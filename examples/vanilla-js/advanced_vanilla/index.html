@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Biscuit Advanced Example</title>
+    <script type="module">
+        import Biscuit from "../../src/biscuit.js";
+
+        // --- 1. Subscribe to changes ---
+        const unsubscribe = Biscuit.subscribe(state => {
+            console.log("Biscuit state changed:", state);
+            document.getElementById("cache").textContent = JSON.stringify(state, null, 2);
+        });
+
+        // --- 2. Set a value with TTL 10s ---
+        await Biscuit.set(
+            "profile",
+            { name: "Martins", age: 25 },
+            10000, // TTL 10 seconds
+            async () => {
+                // Background refresh function
+                console.log("Fetching fresh profile from API...");
+                // Simulate API call
+                return { name: "Martins", age: Math.floor(Math.random() * 50) };
+            }
+        );
+
+        // --- 3. Get the value ---
+        const profile = Biscuit.get("profile");
+        console.log("Initial get:", profile);
+
+        // --- 4. Mutate the object ---
+        await Biscuit.mutate("profile", current => ({
+            ...current,
+            age: current.age + 1
+        }));
+
+        // --- 5. Extend TTL ---
+        const extendedProfile = Biscuit.get("profile", { extend: true });
+        console.log("Extended TTL profile:", extendedProfile);
+
+        // --- 6. Remove a key ---
+        setTimeout(async () => {
+            console.log("Removing 'profile' key...");
+            await Biscuit.remove("profile");
+        }, 15000);
+
+        // --- 7. Set another key ---
+        await Biscuit.set("settings", { theme: "dark", notifications: true }, 20000);
+
+        // --- 8. Clear all cache ---
+        setTimeout(async () => {
+            console.log("Clearing entire Biscuit cache...");
+            await Biscuit.clear();
+        }, 25000);
+
+        // --- 9. Unsubscribe after 30s ---
+        setTimeout(() => {
+            console.log("Unsubscribing from Biscuit changes...");
+            unsubscribe();
+        }, 30000);
+    </script>
+</head>
+
+<body>
+    <h1>Advanced Biscuit Example</h1>
+    <pre id="cache">Cache will appear here...</pre>
+    <p>Open console to see all Biscuit operations in action.</p>
+</body>
+
+</html>
