@@ -1,5 +1,5 @@
 {
-    "name": "biscuit-js",
+    "name": "biscuit-cache-js",
     "version": "1.0.0",
     "description": "A lightweight, persistent, reactive browser cache with background refresh and cross-tab sync. Works like a normal cache but supercharged with sticky TTL and offline support.",
     "main": "src/biscuit.js",
