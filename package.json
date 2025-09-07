@@ -1,0 +1,47 @@
+{
+    "name": "biscuit-js",
+    "version": "1.0.0",
+    "description": "A lightweight, persistent, reactive browser cache with background refresh and cross-tab sync. Works like a normal cache but supercharged with sticky TTL and offline support.",
+    "main": "src/biscuit.js",
+    "types": "src/biscuit.d.ts",
+    "type": "module",
+    "exports": {
+        ".": {
+            "import": "./src/biscuit.js",
+            "types": "./src/biscuit.d.ts"
+        }
+    },
+    "keywords": [
+        "cache",
+        "biscuit",
+        "frontend",
+        "spa",
+        "reactive",
+        "indexeddb",
+        "localstorage",
+        "cross-tab",
+        "background-refresh",
+        "state-management"
+    ],
+    "author": "Martins Kelvin",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/martino-kevo/biscuit-js.git"
+    },
+    "peerDependencies": {
+        "react": ">=17.0.0"
+    },
+    "peerDependenciesMeta": {
+        "react": {
+            "optional": true
+        }
+    },
+    "files": [
+        "src"
+    ],
+    "scripts": {
+        "test": "echo \"No tests yet\"",
+        "prepublishOnly": "echo \"Building Biscuit...\""
+    }
+}
