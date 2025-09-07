@@ -15,7 +15,7 @@ Chewy, persistent, reactive browser cache with background refresh and cross-tab 
 ## Installation
 
 ```bash
-npm install biscuit-js
+npm install biscuit-cache-js
 
 
 **Usage**
