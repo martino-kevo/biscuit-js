@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import Biscuit from "../../src/biscuit.js";
+import Biscuit from "biscuit-cache-js";
 
 export default function App() {
     const [profile, setProfile] = useState(Biscuit.get("profile"));

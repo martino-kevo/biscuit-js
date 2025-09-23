@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Biscuit Stale While Revalidate JS Example</title>
+    <script type="module">
+        import Biscuit from "./biscuit.js";
+
+        async function fetchUser() {
+            console.log("Fetching fresh user...");
+            const res = await fetch("/api/user");
+            return res.json();
+        }
+
+        // Set initial user with fetcher for auto-refresh
+        await Biscuit.set("user", { name: "Loading..." }, 5000, fetchUser);
+
+        // Get user (stale value immediately, then refresh in background if expired)
+        console.log("Initial user:", Biscuit.get("user", { staleWhileRevalidate: true }));
+
+        // Subscribe to see fresh updates after revalidation
+        Biscuit.subscribe(state => console.log("User updated:", state.user));
+    </script>
+</head>
+
+<body>
+    <h1>Check console for Biscuit output!</h1>
+</body>
+
+</html>

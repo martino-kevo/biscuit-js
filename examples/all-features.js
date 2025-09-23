@@ -1,5 +1,5 @@
 // examples/all-features.js
-import Biscuit from "biscuit-js";
+import Biscuit from "biscuit-cache-js";
 
 /**
  * Simulates an API call

@@ -1,4 +1,4 @@
-import Biscuit from "../../src/biscuit.js";
+import Biscuit from "biscuit-cache-js";
 
 interface Profile {
     name: string;

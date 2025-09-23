@@ -1,4 +1,4 @@
-import Biscuit from "biscuit-js";
+import Biscuit from "biscuit-cache-js";
 
 async function main() {
   await Biscuit.set("user", { id: 1, name: "Martins" });

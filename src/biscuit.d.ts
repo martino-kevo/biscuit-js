@@ -34,19 +34,13 @@ interface BiscuitAPI {
 
     /**
      * Mutate a cached value using a mutator function
-     * @param key Cache key
-     * @param mutator Function to produce new value
      */
     mutate<T>(key: string, mutator: Mutator<T>): Promise<void>;
 
-    /**
-     * Remove a specific key from Biscuit
-     */
+    /** Remove a specific key from Biscuit */
     remove(key: string): Promise<void>;
 
-    /**
-     * Clear the entire Biscuit store
-     */
+    /** Clear the entire Biscuit store */
     clear(): Promise<void>;
 
     /**
@@ -55,27 +49,28 @@ interface BiscuitAPI {
      */
     subscribe(fn: (state: Record<string, any>) => void): () => void;
 
-    /**
-     * Force-refresh a specific key (ignores TTL)
-     */
+    /** Force-refresh a specific key (ignores TTL) */
     refresh(key: string): Promise<void>;
 
-    /**
-     * Check if a key exists and is still fresh (without extending TTL)
-     */
+    /** Check if a key exists and is still fresh (without extending TTL) */
     has(key: string): boolean;
 
-    /**
-     * Get all keys currently in Biscuit
-     */
+    /** Get all keys currently in Biscuit */
     keys(): string[];
 
-    /**
-     * Number of keys currently stored in memory
-     */
+    /** Number of keys currently stored in memory */
     size(): number;
 }
 
+interface BiscuitFactory {
+    /**
+     * Create a new Biscuit instance with its own namespace
+     */
+    (config?: { namespace?: string }): BiscuitAPI;
+}
+
 declare const Biscuit: BiscuitAPI;
+declare const createBiscuit: BiscuitFactory;
 
 export default Biscuit;
+export { createBiscuit, BiscuitAPI, GetOptions, BiscuitEntry, Fetcher, Mutator };

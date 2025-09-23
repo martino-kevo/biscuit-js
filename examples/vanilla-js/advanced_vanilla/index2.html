@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Biscuit Example</title>
+    <script type="module">
+        import Biscuit from "../../src/biscuit.js";
+
+        // Set a value
+        await Biscuit.set("theme", "dark", 5000);
+
+        // Get a value
+        const theme = Biscuit.get("theme");
+        console.log("Theme is:", theme);
+
+        // Subscribe to changes
+        const unsubscribe = Biscuit.subscribe(state => {
+            console.log("Biscuit changed!", state);
+        });
+
+        // Mutate a value
+        await Biscuit.mutate("theme", current => (current === "dark" ? "light" : "dark"));
+
+        // Cleanup
+        setTimeout(() => {
+            unsubscribe();
+        }, 10000);
+    </script>
+</head>
+
+<body>
+    <h1>ABiscuit Example</h1>
+    <p>Open console to see all Biscuit operations in action.</p>
+</body>
+
+</html>

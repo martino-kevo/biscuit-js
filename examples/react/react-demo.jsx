@@ -1,7 +1,7 @@
 // examples/react-demo.jsx
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import Biscuit from "biscuit-js";
+import Biscuit from "biscuit-cache-js";
 
 async function fetchFriends() {
   console.log("📡 Fetching friends from backend...");
