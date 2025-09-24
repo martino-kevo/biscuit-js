@@ -66,6 +66,17 @@ interface BiscuitAPI {
 
     /** Number of keys currently stored in memory */
     size(): number;
+
+    /**
+     * Enable debug logging to the console.
+     * Helpful for development to see when Biscuit opens DB, persists values, etc.
+     */
+    enableDebug(): void;
+
+    /**
+     * Disable debug logging.
+     */
+    disableDebug(): void;
 }
 
 interface BiscuitFactory {

@@ -10,6 +10,7 @@ function createBiscuit({ namespace = "" } = {}) {
   const STORAGE_KEY = `biscuit-sync${prefix}`; // localStorage key for fallback
 
   let db;
+  let debugEnabled = false;
 
   const jar = new Map(); // In-memory cache: key -> { value, expiry, ttl }
   // ttl is time-to-live in ms, used for refreshing
@@ -24,7 +25,12 @@ function createBiscuit({ namespace = "" } = {}) {
   const channelSupported = typeof BroadcastChannel === "function";
   const channel = channelSupported ? new BroadcastChannel(CHANNEL_NAME) : null;
 
+  function log(...args) {
+    if (debugEnabled) console.log("[BISCUIT]", ...args);
+  }
+
   function broadcastChange(key, value) {
+    log("Broadcast change:", { key, value });
     if (channelSupported) {
       channel.postMessage({ key, value });
     } else {
@@ -36,6 +42,7 @@ function createBiscuit({ namespace = "" } = {}) {
   }
 
   function handleRemoteUpdate(key, value) {
+    log("Remote update received:", { key, value });
     const entry = jar.get(key);
     if (!entry || JSON.stringify(entry.value) !== JSON.stringify(value)) {
       jar.set(key, {
@@ -60,15 +67,23 @@ function createBiscuit({ namespace = "" } = {}) {
   // IndexedDB setup
   function openDB() {
     return new Promise((resolve, reject) => {
+      log("Opening IndexedDB:", DB_NAME);
       const request = indexedDB.open(DB_NAME, 1);
       request.onupgradeneeded = (e) => {
         const db = e.target.result;
         if (!db.objectStoreNames.contains(STORE_NAME)) {
+          log("Creating object store:", STORE_NAME);
           db.createObjectStore(STORE_NAME, { keyPath: "key" });
         }
       };
-      request.onsuccess = (e) => resolve(e.target.result);
-      request.onerror = (e) => reject(e);
+      request.onsuccess = (e) => {
+        log("IndexedDB open successful");
+        resolve(e.target.result);
+      };
+      request.onerror = (e) => {
+        console.error("[BISCUIT] IndexedDB open failed", e);
+        reject(e);
+      };
     });
   }
 
@@ -81,6 +96,7 @@ function createBiscuit({ namespace = "" } = {}) {
 
     return new Promise((resolve) => {
       req.onsuccess = () => {
+        log("Loaded from IndexedDB:", req.result);
         req.result.forEach((entry) => {
           if (Date.now() < entry.expiry) {
             jar.set(entry.key, entry);
@@ -103,16 +119,18 @@ function createBiscuit({ namespace = "" } = {}) {
   // Public: wait for DB to be ready
   async function ready() {
     await dbReady;
+    log("Biscuit ready");
   }
 
   // Save entry to IndexedDB
   async function persist(key, value, expiry) {
     return withDB(async () => {
       try {
+        log("Persisting key:", key, "value:", value, "expiry:", expiry);
         const tx = db.transaction(STORE_NAME, "readwrite");
         await tx.objectStore(STORE_NAME).put({ key, value, expiry });
       } catch (err) {
-        console.error("Biscuit persist failed:", err);
+        console.error("[BISCUIT] Persist failed:", err);
       }
     });
   }
@@ -121,10 +139,11 @@ function createBiscuit({ namespace = "" } = {}) {
   async function removeFromDB(key) {
     return withDB(async () => {
       try {
+        log("Removing key from DB:", key);
         const tx = db.transaction(STORE_NAME, "readwrite");
         await tx.objectStore(STORE_NAME).delete(key);
       } catch (err) {
-        console.error("Biscuit remove failed:", err);
+        console.error("[BISCUIT] Remove failed:", err);
       }
     });
   }
@@ -133,16 +152,18 @@ function createBiscuit({ namespace = "" } = {}) {
   async function clearDB() {
     return withDB(async () => {
       try {
+        log("Clearing DB");
         const tx = db.transaction(STORE_NAME, "readwrite");
         await tx.objectStore(STORE_NAME).clear();
       } catch (err) {
-        console.error("Biscuit clear failed:", err);
+        console.error("[BISCUIT] Clear failed:", err);
       }
     });
   }
 
   // Notify all subscribers of changes
   function notify() {
+    log("Notifying subscribers");
     subscribers.forEach((fn) => fn(getAll()));
   }
 
@@ -159,6 +180,7 @@ function createBiscuit({ namespace = "" } = {}) {
   // Set a value with optional TTL and fetcher for background refresh
   async function set(key, value, ttl = 5 * 60 * 1000, fetcher = null) {
     await dbReady;
+    log("Setting key:", key, "value:", value, "ttl:", ttl);
     const expiry = Date.now() + ttl;
     const entry = { key, value, expiry, ttl };
     jar.set(key, entry);
@@ -173,11 +195,13 @@ function createBiscuit({ namespace = "" } = {}) {
   // Get a value, optionally extending TTL or using stale-while-revalidate
   function get(key, { extend = true, staleWhileRevalidate = false } = {}) {
     const entry = jar.get(key);
+    log("Getting key:", key, "entry:", entry);
     if (!entry) return null;
 
     const expired = Date.now() > entry.expiry;
 
     if (expired) {
+      log("Key expired:", key);
       if (staleWhileRevalidate && refreshers.get(key)) {
         refresh(key);
         return entry.value;
@@ -200,6 +224,7 @@ function createBiscuit({ namespace = "" } = {}) {
 
   // Mutate a value with a mutator function
   async function mutate(key, mutator) {
+    log("Mutating key:", key);
     const current = get(key, { extend: false });
     if (current === null) return;
     const newValue = mutator(current);
@@ -208,6 +233,7 @@ function createBiscuit({ namespace = "" } = {}) {
 
   // Remove a value
   async function remove(key) {
+    log("Removing key:", key);
     jar.delete(key);
     refreshers.delete(key);
     if (refreshTimers.has(key)) {
@@ -221,6 +247,7 @@ function createBiscuit({ namespace = "" } = {}) {
 
   // Clear all entries
   async function clear() {
+    log("Clearing all keys");
     jar.clear();
     refreshers.clear();
     refreshTimers.forEach((t) => clearTimeout(t));
@@ -246,6 +273,7 @@ function createBiscuit({ namespace = "" } = {}) {
 
     const ttl = entry.ttl || 5 * 60 * 1000;
     const refreshTime = expiry - Date.now() - ttl * 0.1;
+    log("Scheduling refresh for", key, "in", refreshTime, "ms");
     if (refreshTime <= 0) return;
 
     const timer = setTimeout(() => refresh(key), refreshTime);
@@ -255,12 +283,13 @@ function createBiscuit({ namespace = "" } = {}) {
   // Refresh data using the fetcher function
   async function refresh(key) {
     const fetcher = refreshers.get(key);
+    log("Refreshing key:", key);
     if (!fetcher) return;
     try {
       const freshValue = await fetcher();
       await set(key, freshValue, jar.get(key)?.ttl, fetcher);
     } catch (e) {
-      console.warn(`Biscuit refresh failed for ${key}:`, e);
+      console.warn(`[BISCUIT] Refresh failed for ${key}:`, e);
     }
   }
 
@@ -280,13 +309,23 @@ function createBiscuit({ namespace = "" } = {}) {
     return Array.from(jar.keys());
   }
 
+  function enableDebug() {
+    debugEnabled = true;
+    log("Debug mode enabled");
+  }
+
+  function disableDebug() {
+    log("Debug mode disabled");
+    debugEnabled = false;
+  }
+
   // Expose for debugging in devtools
   if (typeof window !== "undefined") {
     window[`__BISCUIT__${prefix}`] = { jar, refresh, clear, keys, size, getAll };
   }
 
   // Return public API
-  return { ready, set, get, mutate, remove, clear, subscribe, refresh, has, keys, size };
+  return { ready, set, get, mutate, remove, clear, subscribe, refresh, has, keys, size, enableDebug, disableDebug };
 }
 
 const Biscuit = createBiscuit();
