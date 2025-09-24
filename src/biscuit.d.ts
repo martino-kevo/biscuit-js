@@ -6,6 +6,8 @@ interface BiscuitEntry<T> {
     value: T;
     expiry: number;
     ttl?: number;
+    fetcherId?: string; // optional ID for rebinding fetchers
+    salt?: string; // optional per-entry salt if encryption enabled
 }
 
 interface GetOptions {
@@ -15,11 +17,28 @@ interface GetOptions {
     staleWhileRevalidate?: boolean;
 }
 
+interface BiscuitConfig {
+    /** Unique namespace → creates a separate IndexedDB per namespace */
+    namespace?: string;
+
+    /** Max items in memory (LRU eviction if exceeded) */
+    maxEntries?: number;
+
+    /** Warn/purge when IndexedDB quota is close to limit */
+    quotaThreshold?: number; // e.g. 0.9 = 90%
+
+    /** Optional secret key for AES-GCM encryption */
+    secret?: string;
+
+    /** Callback to handle missing fetchers after init */
+    onMissingFetchers?: (ids: string[]) => void | Promise<void>;
+}
+
 interface BiscuitAPI {
     /**
-   * Waits for Biscuit's internal IndexedDB to finish loading.
-   * Try calling before using `.get()` or `.set()` on first page load.
-   */
+     * Waits for Biscuit's internal IndexedDB to finish loading.
+     * Try calling before using `.get()` or `.set()` on first page load.
+     */
     ready(): Promise<void>;
 
     /**
@@ -28,15 +47,22 @@ interface BiscuitAPI {
      * @param value Data to cache
      * @param ttl Time-to-live in ms (default: 5 minutes)
      * @param fetcher Optional async fetcher for background refresh
+     * @param fetcherId Optional ID for later rebinding
      */
-    set<T>(key: string, value: T, ttl?: number, fetcher?: Fetcher<T>): Promise<void>;
+    set<T>(
+        key: string,
+        value: T,
+        ttl?: number,
+        fetcher?: Fetcher<T>,
+        fetcherId?: string
+    ): Promise<void>;
 
     /**
      * Get a value from Biscuit
      * @param key Cache key
      * @param options Extend TTL or return stale value while revalidating
      */
-    get<T>(key: string, options?: GetOptions): T | null;
+    get<T>(key: string, options?: GetOptions): Promise<T | null>;
 
     /**
      * Mutate a cached value using a mutator function
@@ -67,27 +93,33 @@ interface BiscuitAPI {
     /** Number of keys currently stored in memory */
     size(): number;
 
-    /**
-     * Enable debug logging to the console.
-     * Helpful for development to see when Biscuit opens DB, persists values, etc.
-     */
+    /** Enable debug logging to the console */
     enableDebug(): void;
 
-    /**
-     * Disable debug logging.
-     */
+    /** Disable debug logging */
     disableDebug(): void;
+
+    /** Returns true if the browser is online */
+    isOnline(): boolean;
 }
 
 interface BiscuitFactory {
     /**
      * Create a new Biscuit instance with its own namespace
      */
-    (config?: { namespace?: string }): BiscuitAPI;
+    (config?: BiscuitConfig): BiscuitAPI;
 }
 
 declare const Biscuit: BiscuitAPI;
 declare const createBiscuit: BiscuitFactory;
 
 export default Biscuit;
-export { createBiscuit, BiscuitAPI, GetOptions, BiscuitEntry, Fetcher, Mutator };
+export {
+    createBiscuit,
+    BiscuitAPI,
+    GetOptions,
+    BiscuitEntry,
+    Fetcher,
+    Mutator,
+    BiscuitConfig
+};
