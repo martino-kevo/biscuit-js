@@ -17,6 +17,12 @@ interface GetOptions {
 
 interface BiscuitAPI {
     /**
+   * Waits for Biscuit's internal IndexedDB to finish loading.
+   * Try calling before using `.get()` or `.set()` on first page load.
+   */
+    ready(): Promise<void>;
+
+    /**
      * Store a value in Biscuit
      * @param key Unique identifier
      * @param value Data to cache

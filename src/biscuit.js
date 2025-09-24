@@ -87,7 +87,8 @@ function createBiscuit({ namespace = "" } = {}) {
             scheduleRefresh(entry.key, entry.expiry);
           }
         });
-        resolve();
+        notify();
+        resolve(); // resolve only when jar is populated
       };
     });
   }
@@ -97,6 +98,11 @@ function createBiscuit({ namespace = "" } = {}) {
   async function withDB(fn) {
     await dbReady;
     return fn();
+  }
+
+  // Public: wait for DB to be ready
+  async function ready() {
+    await dbReady;
   }
 
   // Save entry to IndexedDB
@@ -280,7 +286,7 @@ function createBiscuit({ namespace = "" } = {}) {
   }
 
   // Return public API
-  return { set, get, mutate, remove, clear, subscribe, refresh, has, keys, size };
+  return { ready, set, get, mutate, remove, clear, subscribe, refresh, has, keys, size };
 }
 
 const Biscuit = createBiscuit();
