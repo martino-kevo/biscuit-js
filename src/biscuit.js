@@ -37,7 +37,12 @@ function createBiscuit({
   const refreshers = new Map(); // key -> function
   const refreshTimers = new Map();
   const accessTimestamps = new Map();
+
+  // --- existing global subscribers
   const subscribers = new Set();
+
+  // --- new per-key subscribers
+  const keySubscribers = new Map();
 
   // persisted fetcher registry (id->fn) in-memory
   const fetcherRegistry = new Map();
@@ -88,7 +93,7 @@ function createBiscuit({
         if (!_db.objectStoreNames.contains(STORE_NAME)) _db.createObjectStore(STORE_NAME, { keyPath: "key" });
       };
       req.onsuccess = (e) => resolve(e.target.result);
-      req.onerror = (e) => reject(e.target.error);
+      req.onerror = (e) => reject(e.target?.error || new Error("IDB open failed"));
     });
   }
 
@@ -147,7 +152,7 @@ function createBiscuit({
   async function ensureCryptoKey() {
     if (!useEncryption) return null;
     if (cryptoKeyPromise) return cryptoKeyPromise;
-    if (!db) await openIDB(); // ensure db exists before reading meta
+    if (!db) db = await openIDB(); // ensure db exists before reading meta
     // read meta salt
     const meta = await idbGet("__meta__").catch(() => null);
     if (meta && meta.salt) dbSaltBase64 = meta.salt;
@@ -182,24 +187,51 @@ function createBiscuit({
   // --- cross-tab sync
   const channelSupported = typeof BroadcastChannel === "function";
   const channel = channelSupported ? new BroadcastChannel(CHANNEL_NAME) : null;
-  function broadcastChange(key, value) {
-    log("Broadcast change:", { key, value });
-    if (channelSupported) channel.postMessage({ key, value });
+
+  function broadcastChange(key, entry) {
+    // entry: null for deletion, otherwise { value, expiry, ttl, fetcherId }
+    log("Broadcast change:", { key, entry });
+    if (channelSupported) channel.postMessage({ key, entry });
     else {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ key, value, t: Date.now() })); } catch (e) { log("localStorage broadcast failed", e); }
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ key, entry, t: Date.now() })); }
+      catch (e) { log("localStorage broadcast failed", e); }
     }
   }
-  function handleRemoteUpdate(key, value) {
-    log("Remote update received:", { key, value });
-    const entry = jar.get(key);
-    const newSerialized = JSON.stringify(value);
-    const curSerialized = entry ? JSON.stringify(entry.value) : null;
-    if (!entry || newSerialized !== curSerialized) {
-      jar.set(key, { key, value, expiry: entry?.expiry || Date.now() + 5 * 60 * 1000, ttl: entry?.ttl, fetcherId: entry?.fetcherId });
+
+  function handleRemoteUpdate(key, entry) {
+    log("Remote update received:", { key, entry });
+    const cur = jar.get(key);
+    if (!entry) {
+      // deletion
+      if (cur) {
+        jar.delete(key);
+        accessTimestamps.delete(key);
+        refreshers.delete(key);
+        notify();
+      }
+      return;
+    }
+    // entry has value, expiry, ttl, fetcherId
+    const newSerialized = JSON.stringify(entry.value);
+    const curSerialized = cur ? JSON.stringify(cur.value) : null;
+    const expiry = entry.expiry || (Date.now() + 5 * 60 * 1000);
+    const ttl = entry.ttl || null;
+    const fetcherId = entry.fetcherId || null;
+
+    if (!cur || newSerialized !== curSerialized || cur.expiry !== expiry || cur.ttl !== ttl || cur.fetcherId !== fetcherId) {
+      jar.set(key, { key, value: entry.value, expiry, ttl, fetcherId });
       touchKey(key);
+      // attach fetcher if available
+      if (fetcherId && fetcherRegistry.has(fetcherId)) {
+        refreshers.set(key, fetcherRegistry.get(fetcherId));
+        scheduleRefresh(key, expiry);
+      } else {
+        refreshers.delete(key);
+      }
       notify();
     }
   }
+
   if (channelSupported) channel.onmessage = (e) => handleRemoteUpdate(e.data.key, e.data.value);
   else window.addEventListener("storage", (e) => { if (e.key === STORAGE_KEY && e.newValue) { const { key, value } = JSON.parse(e.newValue); handleRemoteUpdate(key, value); } });
 
@@ -277,14 +309,20 @@ function createBiscuit({
   async function clearDB() { return withDB(async () => { try { await idbClear(); } catch (err) { console.error("[BISCUIT] Clear failed:", err); } }); }
 
   // --- snapshot & notify
-  function getAll() {
+  function getAll({ includeMeta = false } = {}) {
     const result = {};
-    for (const [k, { value }] of jar.entries()) result[k] = value;
+    for (const [k, entry] of jar.entries()) result[k] = includeMeta ? { value: entry.value, ttl: entry.ttl, expiry: entry.expiry, fetcherId: entry.fetcherId } : entry.value;
     return result;
   }
   function notify() {
     const snapshot = getAll();
+    // global subscribers
     subscribers.forEach((fn) => { try { fn(snapshot); } catch (e) { log("subscriber error", e); } });
+    // per-key subscribers
+    for (const [key, subs] of keySubscribers.entries()) {
+      const value = jar.get(key)?.value ?? null;
+      subs.forEach((fn) => { try { fn(value); } catch (e) { log("key-subscriber error", e); } });
+    }
   }
 
   // --- LRU helpers
@@ -360,7 +398,7 @@ function createBiscuit({
     }
 
     await persist(key, value, expiry, ttl, fetcherIdToPersist);
-    broadcastChange(key, value);
+    broadcastChange(key, { value, expiry, ttl, fetcherId: fetcherIdToPersist });
     scheduleRefresh(key, expiry);
     await enforceMaxSizeIfNeeded();
     notify();
@@ -390,7 +428,6 @@ function createBiscuit({
     }
 
     if (extend) {
-      const fetcher = refreshers.get(key);
       entry.expiry = Date.now() + (entry.ttl || 5 * 60 * 1000);
       await persist(key, entry.value, entry.expiry, entry.ttl, jar.get(key)?.fetcherId || null);
       scheduleRefresh(key, entry.expiry);
@@ -402,7 +439,7 @@ function createBiscuit({
   async function mutate(key, mutator) {
     const current = await get(key, { extend: false });
     if (current === null) return;
-    const newValue = mutator(current);
+    const newValue = await Promise.resolve(mutator(current));
     await set(key, newValue, jar.get(key)?.ttl, refreshers.get(key) ? { fn: refreshers.get(key), id: jar.get(key)?.fetcherId } : null);
   }
 
@@ -425,6 +462,20 @@ function createBiscuit({
   }
 
   function subscribe(fn) { subscribers.add(fn); try { fn(getAll()); } catch (e) { } return () => subscribers.delete(fn); }
+  function subscribeKey(key, fn) {
+    if (!keySubscribers.has(key)) keySubscribers.set(key, new Set());
+
+    const setForKey = keySubscribers.get(key);
+    setForKey.add(fn);
+
+    // fire immediately with current value
+    try { fn(jar.get(key)?.value ?? null); } catch (e) { }
+
+    return () => {
+      setForKey.delete(fn);
+      if (setForKey.size === 0) keySubscribers.delete(key);
+    };
+  }
 
   // --- refresh scheduling & execution (pauses when offline)
   let online = typeof navigator !== "undefined" ? navigator.onLine : true;
@@ -446,15 +497,41 @@ function createBiscuit({
     const fetcher = refreshers.get(key);
     if (!fetcher) return;
     if (!isOnline()) return;
-    try {
-      const freshValue = await fetcher();
-      const fetcherId = jar.get(key)?.fetcherId || null;
-      await set(key, freshValue, jar.get(key)?.ttl, fetcherId ? { fn: fetcher, id: fetcherId } : fetcher);
-    } catch (e) { console.warn(`[BISCUIT] Refresh failed for ${key}:`, e); }
+
+    async function tryFetch(attempt) {
+      try {
+        const freshValue = await fetcher();
+        const fetcherId = jar.get(key)?.fetcherId || null;
+        await set(
+          key,
+          freshValue,
+          jar.get(key)?.ttl,
+          fetcherId ? { fn: fetcher, id: fetcherId } : fetcher
+        );
+        return true;
+      } catch (e) {
+        console.warn(`[BISCUIT] Refresh failed (attempt ${attempt}) for ${key}:`, e);
+        return false;
+      }
+    }
+
+    // First attempt
+    const ok = await tryFetch(1);
+    if (!ok) {
+      // Retry once after small delay
+      await new Promise((r) => setTimeout(r, 1000));
+      await tryFetch(2);
+    }
   }
 
   function has(key) { const entry = jar.get(key); return !!entry && Date.now() < entry.expiry; }
-  function size() { return jar.size; }
+  function size({ includeExpired = false } = {}) {
+    if (includeExpired) return jar.size;
+    const now = Date.now();
+    let count = 0;
+    for (const e of jar.values()) if (now < e.expiry) count++;
+    return count;
+  }
   function keys() { return Array.from(jar.keys()); }
   function enableDebug() { debugEnabled = true; log("Debug enabled"); }
   function disableDebug() { log("Debug disabled"); debugEnabled = false; }
@@ -535,6 +612,7 @@ function createBiscuit({
     remove,
     clear,
     subscribe,
+    subscribeKey,
     refresh,
     has,
     keys,

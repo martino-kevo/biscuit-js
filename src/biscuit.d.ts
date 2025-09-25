@@ -1,6 +1,6 @@
 // biscuit.d.ts
 type Fetcher<T> = () => Promise<T>;
-type Mutator<T> = (current: T) => T;
+type Mutator<T> = (current: T) => T | Promise<T>;
 
 interface BiscuitEntry<T> {
     value: T;
@@ -22,10 +22,10 @@ interface BiscuitConfig {
     namespace?: string;
 
     /** Max items in memory (LRU eviction if exceeded) */
-    maxEntries?: number;
+    maxSize?: number;
 
     /** Warn/purge when IndexedDB quota is close to limit */
-    quotaThreshold?: number; // e.g. 0.9 = 90%
+    quotaWarningThreshold?: number; // e.g. 0.9 = 90%
 
     /** Optional secret key for AES-GCM encryption */
     secret?: string;
@@ -65,7 +65,7 @@ interface BiscuitAPI {
     get<T>(key: string, options?: GetOptions): Promise<T | null>;
 
     /**
-     * Mutate a cached value using a mutator function
+     * Mutate a cached value using a mutator functions
      */
     mutate<T>(key: string, mutator: Mutator<T>): Promise<void>;
 
@@ -80,6 +80,11 @@ interface BiscuitAPI {
      * Returns an unsubscribe function.
      */
     subscribe(fn: (state: Record<string, any>) => void): () => void;
+
+    /** Subscribe to updates for a specific key.
+     * Returns an unsubscribe function.
+     */
+    subscribeKey<T>(key: string, fn: (value: T | null) => void): () => void;
 
     /** Force-refresh a specific key (ignores TTL) */
     refresh(key: string): Promise<void>;
