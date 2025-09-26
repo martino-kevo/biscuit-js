@@ -23,7 +23,7 @@
         "background-refresh",
         "state-management"
     ],
-    "author": "Martins Kelvin",
+    "author": "Martins Kelvin <martinsifekelvin@gmail.com>",
     "license": "MIT",
     "repository": {
         "type": "git",

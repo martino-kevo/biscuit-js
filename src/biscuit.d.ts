@@ -106,6 +106,18 @@ interface BiscuitAPI {
 
     /** Returns true if the browser is online */
     isOnline(): boolean;
+
+    /** Register a fetcher function for a given ID */
+    registerFetcher<T>(id: string, fn: Fetcher<T>): void;
+
+    /** Get a list of fetcher IDs that are missing (persisted but not registered) */
+    getMissingFetcherIds(): string[];
+
+    /** Inspect internal state (for debugging/testing) */
+    inspect(): any;
+
+    /** Permanently destroy this Biscuit instance and free resources */
+    destroy(): void;
 }
 
 interface BiscuitFactory {

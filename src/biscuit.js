@@ -32,6 +32,7 @@ function createBiscuit({
 
   let db;
   let debugEnabled = !!debug;
+  let destroyed = false;
 
   const jar = new Map(); // key -> { key, value, expiry, ttl, fetcherId? }
   const refreshers = new Map(); // key -> function
@@ -40,12 +41,12 @@ function createBiscuit({
 
   // --- existing global subscribers
   const subscribers = new Set();
-
   // --- new per-key subscribers
   const keySubscribers = new Map();
-
   // persisted fetcher registry (id->fn) in-memory
   const fetcherRegistry = new Map();
+
+  const refreshGenerations = new Map();
 
   function log(...args) { if (debugEnabled) console.log("[BISCUIT]", ...args); }
 
@@ -376,11 +377,15 @@ function createBiscuit({
 
   // --- public API: set/get/mutate/remove/clear/subscribe
   async function set(key, value, ttl = 5 * 60 * 1000, fetcher = null) {
+    ensureNotDestroyed();
+    if (typeof key !== "string" || !key) throw new Error("set() expects a non-empty string key");
     await dbReady;
     const expiry = Date.now() + ttl;
     const entry = { key, value, expiry, ttl };
     jar.set(key, entry);
     touchKey(key);
+
+    if (jar.size === 1) startGcTimer(); // start GC when first entry arrives
 
     let fetcherIdToPersist = null;
     if (fetcher) {
@@ -406,6 +411,8 @@ function createBiscuit({
   }
 
   async function get(key, { extend = true, staleWhileRevalidate = false } = {}) {
+    ensureNotDestroyed();
+    if (typeof key !== "string" || !key) throw new Error("get() expects a non-empty string key");
     await dbReady;
     const entry = jar.get(key);
     if (!entry) return null;
@@ -437,32 +444,72 @@ function createBiscuit({
   }
 
   async function mutate(key, mutator) {
+    ensureNotDestroyed();
+    if (typeof mutator !== "function") throw new Error("mutate() expects a function as second argument");
+    if (typeof key !== "string" || !key) throw new Error("mutate() expects a non-empty string key");
+
     const current = await get(key, { extend: false });
     if (current === null) return;
+
+    // capture generation before mutator runs
+    const expectedGen = refreshGenerations.get(key) || 0;
+
     const newValue = await Promise.resolve(mutator(current));
-    await set(key, newValue, jar.get(key)?.ttl, refreshers.get(key) ? { fn: refreshers.get(key), id: jar.get(key)?.fetcherId } : null);
+
+    // check if another refresh/mutate changed the key in between
+    if ((refreshGenerations.get(key) || 0) !== expectedGen) {
+      log(`mutate() aborted for ${key} — value changed during mutation`);
+      return;
+    }
+    // bump generation so later stale ops won't overwrite
+    refreshGenerations.set(key, expectedGen + 1);
+
+    await set(
+      key,
+      newValue,
+      jar.get(key)?.ttl,
+      refreshers.get(key) ? { fn: refreshers.get(key), id: jar.get(key)?.fetcherId } : null
+    );
   }
 
   async function remove(key) {
+    ensureNotDestroyed();
+    if (typeof key !== "string" || !key) throw new Error("remove() expects a non-empty string key");
+    if (!jar.has(key)) return;
     jar.delete(key);
     refreshers.delete(key);
     accessTimestamps.delete(key);
+
+    // bump generation so pending refresh results are ignored
+    refreshGenerations.set(key, (refreshGenerations.get(key) || 0) + 1);
+
     if (refreshTimers.has(key)) { clearTimeout(refreshTimers.get(key)); refreshTimers.delete(key); }
     await removeFromDB(key);
     broadcastChange(key, null);
     notify();
+    if (jar.size === 0) stopGcTimer(); // stop GC when jar is empty
   }
 
   async function clear() {
+    ensureNotDestroyed();
     jar.clear(); refreshers.clear(); accessTimestamps.clear();
+
+    // bump generation for all keys so pending refreshes abort
+    for (const key of refreshGenerations.keys()) {
+      refreshGenerations.set(key, (refreshGenerations.get(key) || 0) + 1);
+    }
     refreshTimers.forEach((t) => clearTimeout(t)); refreshTimers.clear();
     await clearDB();
     broadcastChange(null, null);
     notify();
+    stopGcTimer(); // nothing left to GC
   }
 
-  function subscribe(fn) { subscribers.add(fn); try { fn(getAll()); } catch (e) { } return () => subscribers.delete(fn); }
+  function subscribe(fn) { ensureNotDestroyed(); subscribers.add(fn); try { fn(getAll()); } catch (e) { } return () => subscribers.delete(fn); }
   function subscribeKey(key, fn) {
+    ensureNotDestroyed();
+    if (typeof key !== "string" || !key) throw new Error("subscribeKey() expects a non-empty string key");
+    if (typeof fn !== "function") throw new Error("subscribeKey() expects a function as second argument");
     if (!keySubscribers.has(key)) keySubscribers.set(key, new Set());
 
     const setForKey = keySubscribers.get(key);
@@ -479,62 +526,89 @@ function createBiscuit({
 
   // --- refresh scheduling & execution (pauses when offline)
   let online = typeof navigator !== "undefined" ? navigator.onLine : true;
-  function isOnline() { return online; }
+  function isOnline() { ensureNotDestroyed(); return online; }
 
   function scheduleRefresh(key, expiry) {
     const entry = jar.get(key);
-    if (!entry) return;
-    if (!isOnline()) return;
+    if (!entry || !isOnline()) return;
+
+    // bump generation for this key
+    const gen = (refreshGenerations.get(key) || 0) + 1;
+    refreshGenerations.set(key, gen);
+
     if (refreshTimers.has(key)) clearTimeout(refreshTimers.get(key));
+
     const ttl = entry.ttl || 5 * 60 * 1000;
-    const refreshTime = expiry - Date.now() - Math.floor(ttl * 0.1); // refresh at ~90% of TTL
-    if (refreshTime <= 0) return;
-    const timer = setTimeout(() => refresh(key), refreshTime);
+    const refreshTime = expiry - Date.now() - Math.floor(ttl * 0.1);
+
+    if (refreshTime <= 0) {
+      refresh(key, gen).catch((e) => log("immediate refresh error", e));
+      return;
+    }
+    const timer = setTimeout(() => refresh(key, gen), refreshTime);
     refreshTimers.set(key, timer);
   }
 
-  async function refresh(key) {
+  async function refresh(key, expectedGen = refreshGenerations.get(key)) {
+    ensureNotDestroyed();
+    log("Refreshing key:", key);
     const fetcher = refreshers.get(key);
-    if (!fetcher) return;
-    if (!isOnline()) return;
+    if (!fetcher || !isOnline()) return;
 
-    async function tryFetch(attempt) {
-      try {
-        const freshValue = await fetcher();
-        const fetcherId = jar.get(key)?.fetcherId || null;
-        await set(
-          key,
-          freshValue,
-          jar.get(key)?.ttl,
-          fetcherId ? { fn: fetcher, id: fetcherId } : fetcher
-        );
-        return true;
-      } catch (e) {
-        console.warn(`[BISCUIT] Refresh failed (attempt ${attempt}) for ${key}:`, e);
-        return false;
+    const currentGen = refreshGenerations.get(key);
+    if (expectedGen !== currentGen) return; // superseded
+
+    try {
+      const freshValue = await fetcher();
+
+      // Check conditions again after fetch resolves
+      if (destroyed) return;
+      if (!isOnline()) return;
+      if (!jar.has(key)) return;
+      if (expectedGen !== refreshGenerations.get(key)) return; // another refresh happened since
+
+      const fetcherId = jar.get(key)?.fetcherId || null;
+      await set(
+        key,
+        freshValue,
+        jar.get(key)?.ttl,
+        fetcherId ? { fn: fetcher, id: fetcherId } : fetcher
+      );
+      return true;
+    } catch (e) {
+      console.warn(`[BISCUIT] Refresh failed for ${key}:`, e);
+      // retry once
+      if (expectedGen === refreshGenerations.get(key)) {
+        try {
+          const retryValue = await fetcher();
+          if (!destroyed && isOnline() && jar.has(key) && expectedGen === refreshGenerations.get(key)) {
+            const fetcherId = jar.get(key)?.fetcherId || null;
+            await set(
+              key,
+              retryValue,
+              jar.get(key)?.ttl,
+              fetcherId ? { fn: fetcher, id: fetcherId } : fetcher
+            );
+          }
+        } catch (err) {
+          console.warn(`[BISCUIT] Refresh retry failed for ${key}:`, err);
+        }
       }
-    }
-
-    // First attempt
-    const ok = await tryFetch(1);
-    if (!ok) {
-      // Retry once after small delay
-      await new Promise((r) => setTimeout(r, 1000));
-      await tryFetch(2);
     }
   }
 
-  function has(key) { const entry = jar.get(key); return !!entry && Date.now() < entry.expiry; }
+  function has(key) { ensureNotDestroyed(); const entry = jar.get(key); return !!entry && Date.now() < entry.expiry; }
   function size({ includeExpired = false } = {}) {
+    ensureNotDestroyed();
     if (includeExpired) return jar.size;
     const now = Date.now();
     let count = 0;
     for (const e of jar.values()) if (now < e.expiry) count++;
     return count;
   }
-  function keys() { return Array.from(jar.keys()); }
-  function enableDebug() { debugEnabled = true; log("Debug enabled"); }
-  function disableDebug() { log("Debug disabled"); debugEnabled = false; }
+  function keys() { ensureNotDestroyed(); return Array.from(jar.keys()); }
+  function enableDebug() { ensureNotDestroyed(); debugEnabled = true; log("Debug enabled"); }
+  function disableDebug() { ensureNotDestroyed(); log("Debug disabled"); debugEnabled = false; }
 
   if (typeof window !== "undefined") window[`__BISCUIT__${prefix}`] = { jar, refreshers, refresh, clear, keys, size, getAll };
 
@@ -574,13 +648,26 @@ function createBiscuit({
     }
   }
 
-  const gcTimer = setInterval(() => {
-    garbageCollectOnce().catch((e) => log("GC error", e));
-    checkQuotaAndMaybePurge().catch((e) => log("quota check error", e));
-  }, gcInterval);
+  // --- Garbage collection management
+  let gcTimer = null;
+
+  function startGcTimer() {
+    if (gcTimer) return; // already running
+    gcTimer = setInterval(() => {
+      garbageCollectOnce().catch((e) => log("GC error", e));
+      checkQuotaAndMaybePurge().catch((e) => log("quota check error", e));
+    }, gcInterval);
+  }
+  function stopGcTimer() {
+    if (gcTimer) {
+      clearInterval(gcTimer);
+      gcTimer = null;
+    }
+  }
 
   // --- fetcher registration helpers (for persisted fetcherIds)
   function registerFetcher(id, fn) {
+    ensureNotDestroyed();
     if (!id || typeof fn !== "function") throw new Error("registerFetcher expects (id, function)");
     fetcherRegistry.set(id, fn);
     for (const [k, v] of jar.entries()) {
@@ -591,16 +678,66 @@ function createBiscuit({
     }
   }
   function getMissingFetcherIds() {
+    ensureNotDestroyed();
     const missing = new Set();
     for (const [k, v] of jar.entries()) if (v.fetcherId && !fetcherRegistry.has(v.fetcherId)) missing.add(v.fetcherId);
     return Array.from(missing);
   }
 
-  // --- graceful shutdown internal (for tests)
-  function _shutdown() {
-    clearInterval(gcTimer);
+  // --- inspect utility for dev/debugging
+  function inspect() {
+    ensureNotDestroyed();
+    const now = Date.now();
+
+    const entries = {};
+    for (const [key, entry] of jar.entries()) {
+      entries[key] = {
+        value: entry.value,
+        ttl: entry.ttl ?? null,
+        expiry: entry.expiry ?? null,
+        expired: entry.expiry !== null && entry.expiry <= now,
+        fetcherId: entry.fetcherId || null,
+        fetcherRegistered: refreshers.has(key),
+      };
+    }
+
+    return {
+      now,
+      entries,
+      refreshers: Array.from(refreshers.keys()),
+      refreshTimers: Array.from(refreshTimers.keys()),
+      generations: Object.fromEntries(refreshGenerations.entries()),
+      isOnline: isOnline(),
+      destroyed,
+      gcTimerActive: !!gcTimer,
+      channelSupported,
+      channelOpen: channelSupported && channel ? true : false,
+    };
+  }
+
+  // --- graceful shutdown internal (for tests and public destroy)
+  function destroy() {
+    if (destroyed) return; // prevent double-destroy
+
+    stopGcTimer();
     refreshTimers.forEach((t) => clearTimeout(t));
+    refreshTimers.clear();
+
     if (channelSupported && channel) channel.close();
+
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", handleWentOnline);
+      window.removeEventListener("offline", handleWentOffline);
+    }
+
+    destroyed = true;
+  }
+
+  // --- guard helper
+  function ensureNotDestroyed() {
+    if (destroyed) {
+      throw new Error("Biscuit instance has been destroyed");
+    }
   }
 
   // --- returned API
@@ -622,8 +759,10 @@ function createBiscuit({
     isOnline,
     registerFetcher,
     getMissingFetcherIds,
+    inspect,
+    destroy,
     // internals for dev/testing (not necessary for normal use)
-    __internal: { accessTimestamps, refreshers, refreshTimers, fetcherRegistry, _shutdown },
+    __internal: { accessTimestamps, refreshers, refreshTimers, fetcherRegistry },
   };
 }
 
@@ -637,19 +776,13 @@ export { createBiscuit };
  * 🏗️ FUTURE IMPROVEMENTS FOR BISCUIT
  * -------------------------------------------------------
  *
- * 1. **Error Handling & Retry**
- *    - Expose fetcher errors via a public `onError` callback or event.
- *    - Allow automatic retry with exponential backoff.
- *
  * 2. **Cache Invalidation**
  *    - Provide `invalidate(key)` to force refresh on next `get()`.
  *    - Optionally allow cascading invalidation for related keys
  *      (e.g., invalidate `friends-*` keys when a friend changes).
  *
- *
- * 7. **DevTools Integration**
- *    - Provide a simple browser extension or console inspector for
- *      visualizing Biscuit state, TTL, and refresh timers.
+  * 3. **Batch Operations**
+  * 
  *
  * 8. **TypeScript Enhancements**
  *    - Add types for `createBiscuit({ namespace })` so namespace-based
