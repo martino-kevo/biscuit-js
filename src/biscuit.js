@@ -367,7 +367,6 @@ function createBiscuit({
     const items = Array.from(accessTimestamps.entries()).sort((a, b) => a[1] - b[1]); // oldest first
     while (jar.size > maxSize && items.length) {
       const [evictKey] = items.shift();
-      log("LRU evicting key:", evictKey);
       await remove(evictKey);
     }
   }
