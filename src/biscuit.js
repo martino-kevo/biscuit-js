@@ -266,17 +266,14 @@ function createBiscuit({
           try { value = await decryptValue(e.value); } catch (err) { log("decrypt failed for", e.key, err); continue; }
         }
         if (Date.now() < e.expiry) {
-          log("Setting up non-expiry value from indexedDB upon start up");
           jar.set(e.key, { key: e.key, value, expiry: e.expiry, ttl: e.ttl, fetcherId: e.fetcherId });
           accessTimestamps.set(e.key, Date.now());
           // if fetcherId exists and registry has fn, attach
           if (e.fetcherId && fetcherRegistry.has(e.fetcherId)) {
-            log("fetcherId exists and registry has function, so attaching")
             refreshers.set(e.key, fetcherRegistry.get(e.fetcherId));
             scheduleRefresh(e.key, e.expiry);
           }
         } else {
-          log("Setting up expired value so garbage collector can remove, unless accessed");
           // expired but we'll allow GC to remove it after retention unless accessed
           jar.set(e.key, { key: e.key, value, expiry: e.expiry, ttl: e.ttl, fetcherId: e.fetcherId });
           accessTimestamps.set(e.key, Date.now());
@@ -466,7 +463,7 @@ function createBiscuit({
     if (extend) {
       log("Get item and extend")
       entry.expiry = Date.now() + (entry.ttl || 5 * 60 * 1000);
-      await persist(key, entry.value, entry.expiry, entry.ttl, jar.get(key)?.fetcherId || null);
+      await persist(key, entry.value, entry.expiry, entry.ttl, entry.fetcherId);
       scheduleRefresh(key, entry.expiry);
     }
 
@@ -478,6 +475,9 @@ function createBiscuit({
     log("Mutate item:", { key, mutator });
     if (typeof mutator !== "function") throw new Error("mutate() expects a function as second argument");
     if (typeof key !== "string" || !key) throw new Error("mutate() expects a non-empty string key");
+
+    const entry = jar.get(key)
+    if (!entry) return
 
     const current = await get(key, { extend: false });
     if (current === null) return;
@@ -498,8 +498,9 @@ function createBiscuit({
     await set(
       key,
       newValue,
-      jar.get(key)?.ttl,
-      refreshers.get(key) ? { fn: refreshers.get(key), id: jar.get(key)?.fetcherId } : null
+      entry.ttl,
+      // jar.get(key)?.ttl,
+      refreshers.get(key) ? { fn: refreshers.get(key), id: entry.fetcherId } : null
     );
   }
 
@@ -589,8 +590,9 @@ function createBiscuit({
   async function refresh(key, expectedGen = refreshGenerations.get(key)) {
     ensureNotDestroyed();
     log("Refreshing key:", key);
+    const entry = jar.get(key)
     const fetcher = refreshers.get(key);
-    if (!fetcher || !isOnline()) return;
+    if (!entry || !fetcher || !isOnline()) return;
 
     const currentGen = refreshGenerations.get(key);
     if (expectedGen !== currentGen) return; // superseded
@@ -604,11 +606,13 @@ function createBiscuit({
       if (!jar.has(key)) return;
       if (expectedGen !== refreshGenerations.get(key)) return; // another refresh happened since
 
-      const fetcherId = jar.get(key)?.fetcherId || null;
+      // const fetcherId = jar.get(key)?.fetcherId || null;
+      const fetcherId = entry.fetcherId
       await set(
         key,
         freshValue,
-        jar.get(key)?.ttl,
+        entry.ttl,
+        // jar.get(key)?.ttl,
         fetcherId ? { fn: fetcher, id: fetcherId } : fetcher
       );
       return true;
@@ -620,11 +624,12 @@ function createBiscuit({
         try {
           const retryValue = await fetcher();
           if (!destroyed && isOnline() && jar.has(key) && expectedGen === refreshGenerations.get(key)) {
-            const fetcherId = jar.get(key)?.fetcherId || null;
+            const fetcherId = entry.fetcherId
             await set(
               key,
               retryValue,
-              jar.get(key)?.ttl,
+              entry.ttl,
+              // jar.get(key)?.ttl,
               fetcherId ? { fn: fetcher, id: fetcherId } : fetcher
             );
           }
