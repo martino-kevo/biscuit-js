@@ -28,7 +28,10 @@ function App() {
     return unsubscribe;
   }, []);
 
-  const friends = Biscuit.get("friends") || [];
+  let friends;
+  (async () => {
+    friends = await Biscuit.get("friends") || [];
+  })();
 
   return (
     <div style={{ fontFamily: "sans-serif", padding: 16 }}>

@@ -2,7 +2,7 @@ import Biscuit from "biscuit-cache-js";
 
 async function main() {
   await Biscuit.set("user", { id: 1, name: "Martins" });
-  console.log("User:", Biscuit.get("user"));
+  console.log("User:", await Biscuit.get("user"));
 
   const unsubscribe = Biscuit.subscribe(state => {
     console.log("Biscuit updated:", state);

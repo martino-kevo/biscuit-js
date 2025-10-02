@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import Biscuit from "./biscuit-cache-js";
+import Biscuit from "biscuit-cache-js";
 
 export default function App() {
     const [count, setCount] = useState(0);

@@ -8,7 +8,7 @@ import Biscuit from "biscuit-cache-js";
         await Biscuit.set("username", "Patrick");
     }
 
-    console.log("From cache:", Biscuit.get("username"));
+    console.log("From cache:", await Biscuit.get("username"));
 
     // Later if you want silence
     Biscuit.disableDebug();

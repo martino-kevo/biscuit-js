@@ -56,12 +56,14 @@ function createBiscuit({
   if (secret && !cryptoAvailable) console.warn("[BISCUIT] WebCrypto unavailable — encryption disabled.");
 
   function ab2base64(buffer) {
+    log("Ab2 Base64", buffer);
     const bytes = new Uint8Array(buffer);
     let binary = "";
     for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
     return btoa(binary);
   }
   function base642ab(b64) {
+    log("Base64 2ab", b64);
     const binary = atob(b64);
     const len = binary.length;
     const bytes = new Uint8Array(len);
@@ -70,6 +72,7 @@ function createBiscuit({
   }
 
   async function deriveCryptoKey(passphrase, saltBase64) {
+    log("Derive crypto key", { passphrase, saltBase64 });
     const enc = new TextEncoder();
     const salt = base642ab(saltBase64);
     const passKey = await crypto.subtle.importKey("raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
@@ -87,6 +90,7 @@ function createBiscuit({
 
   // --- IndexedDB helpers (namespace-separated DB and store)
   function openIDB() {
+    log("Opening indexedDB...");
     return new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, 1);
       req.onupgradeneeded = (e) => {
@@ -99,6 +103,7 @@ function createBiscuit({
   }
 
   function idbGet(key) {
+    log("Get an item from indexedDB. Item key:", key);
     return new Promise((resolve, reject) => {
       try {
         const tx = db.transaction(STORE_NAME, "readonly");
@@ -109,6 +114,7 @@ function createBiscuit({
     });
   }
   function idbGetAll() {
+    log("Get all items in indexedDB");
     return new Promise((resolve, reject) => {
       try {
         const tx = db.transaction(STORE_NAME, "readonly");
@@ -119,6 +125,7 @@ function createBiscuit({
     });
   }
   function idbPut(obj) {
+    log("Put / Save an item in indexedDB. Item object:", obj);
     return new Promise((resolve, reject) => {
       try {
         const tx = db.transaction(STORE_NAME, "readwrite");
@@ -129,6 +136,7 @@ function createBiscuit({
     });
   }
   function idbDelete(key) {
+    log("Delete an item in indexedDB. Item key:", key);
     return new Promise((resolve, reject) => {
       try {
         const tx = db.transaction(STORE_NAME, "readwrite");
@@ -139,6 +147,7 @@ function createBiscuit({
     });
   }
   function idbClear() {
+    log("Clear up indexedDB");
     return new Promise((resolve, reject) => {
       try {
         const tx = db.transaction(STORE_NAME, "readwrite");
@@ -151,6 +160,7 @@ function createBiscuit({
 
   // --- crypto helpers that use per-DB salt
   async function ensureCryptoKey() {
+    log("Ensure crypto key");
     if (!useEncryption) return null;
     if (cryptoKeyPromise) return cryptoKeyPromise;
     if (!db) db = await openIDB(); // ensure db exists before reading meta
@@ -158,6 +168,7 @@ function createBiscuit({
     const meta = await idbGet("__meta__").catch(() => null);
     if (meta && meta.salt) dbSaltBase64 = meta.salt;
     else {
+      log("No meta or meta salt or both");
       const s = crypto.getRandomValues(new Uint8Array(16));
       dbSaltBase64 = ab2base64(s.buffer);
       try { await idbPut({ key: "__meta__", salt: dbSaltBase64 }); } catch (e) { log("meta write failed", e); }
@@ -167,6 +178,7 @@ function createBiscuit({
   }
 
   async function encryptValue(value) {
+    log("Encrypt value. Value:", value);
     if (!useEncryption) throw new Error("encryption disabled");
     const key = await ensureCryptoKey();
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -176,6 +188,7 @@ function createBiscuit({
   }
 
   async function decryptValue(stored) {
+    log("Decrypt stored value. Stored value:", stored);
     if (!useEncryption) throw new Error("encryption disabled");
     const key = await ensureCryptoKey();
     const iv = new Uint8Array(base642ab(stored.iv));
@@ -220,6 +233,7 @@ function createBiscuit({
     const fetcherId = entry.fetcherId || null;
 
     if (!cur || newSerialized !== curSerialized || cur.expiry !== expiry || cur.ttl !== ttl || cur.fetcherId !== fetcherId) {
+      log("Remote update. Exact similar value does not exist, so updating.");
       jar.set(key, { key, value: entry.value, expiry, ttl, fetcherId });
       touchKey(key);
       // attach fetcher if available
@@ -238,6 +252,7 @@ function createBiscuit({
 
   // --- init: open db, load entries, prepare crypto + invoke missing fetcher callback
   async function init() {
+    log("Initializing / Starting up");
     db = await openIDB();
     if (useEncryption) {
       try { await ensureCryptoKey(); } catch (e) { console.warn("[BISCUIT] crypto init failed — disabling encryption", e); useEncryption = false; cryptoKeyPromise = null; }
@@ -251,14 +266,17 @@ function createBiscuit({
           try { value = await decryptValue(e.value); } catch (err) { log("decrypt failed for", e.key, err); continue; }
         }
         if (Date.now() < e.expiry) {
+          log("Setting up non-expiry value from indexedDB upon start up");
           jar.set(e.key, { key: e.key, value, expiry: e.expiry, ttl: e.ttl, fetcherId: e.fetcherId });
           accessTimestamps.set(e.key, Date.now());
           // if fetcherId exists and registry has fn, attach
           if (e.fetcherId && fetcherRegistry.has(e.fetcherId)) {
+            log("fetcherId exists and registry has function, so attaching")
             refreshers.set(e.key, fetcherRegistry.get(e.fetcherId));
             scheduleRefresh(e.key, e.expiry);
           }
         } else {
+          log("Setting up expired value so garbage collector can remove, unless accessed");
           // expired but we'll allow GC to remove it after retention unless accessed
           jar.set(e.key, { key: e.key, value, expiry: e.expiry, ttl: e.ttl, fetcherId: e.fetcherId });
           accessTimestamps.set(e.key, Date.now());
@@ -271,6 +289,7 @@ function createBiscuit({
     for (const [k, v] of jar.entries()) if (v.fetcherId && !fetcherRegistry.has(v.fetcherId)) missing.add(v.fetcherId);
     const missingArr = Array.from(missing);
     if (typeof onMissingFetchers === "function") {
+      log("Handling mission fetcher id with onMissingFetcher function");
       try {
         // allow async callback; await it so app can register fetchers synchronously
         await onMissingFetchers(missingArr);
@@ -295,11 +314,13 @@ function createBiscuit({
 
   // --- persistence helper (encrypt if enabled) — stores fetcherId (string) if provided
   async function persist(key, value, expiry, ttl, fetcherId = null) {
+    log("Persist key - value. Item:", { key, value, expiry, ttl, fetcherId });
     return withDB(async () => {
       try {
         let toStore = value;
         let encryptedFlag = false;
         if (useEncryption) {
+          log("Persist key - value. useEncryption:", useEncryption);
           try { toStore = await encryptValue(value); encryptedFlag = true; } catch (e) { console.warn("[BISCUIT] encrypt failed, storing plaintext", e); encryptedFlag = false; toStore = value; }
         }
         await idbPut({ key, value: toStore, expiry, ttl, encrypted: encryptedFlag, fetcherId: fetcherId || null });
@@ -311,11 +332,13 @@ function createBiscuit({
 
   // --- snapshot & notify
   function getAll({ includeMeta = false } = {}) {
+    log("Get all from in-memory Jar");
     const result = {};
     for (const [k, entry] of jar.entries()) result[k] = includeMeta ? { value: entry.value, ttl: entry.ttl, expiry: entry.expiry, fetcherId: entry.fetcherId } : entry.value;
     return result;
   }
   function notify() {
+    log("Notify...");
     const snapshot = getAll();
     // global subscribers
     subscribers.forEach((fn) => { try { fn(snapshot); } catch (e) { log("subscriber error", e); } });
@@ -328,6 +351,7 @@ function createBiscuit({
 
   // --- LRU helpers
   function touchKey(key) {
+    log("Key touched. key:", key);
     accessTimestamps.set(key, Date.now());
     if (maxSize && accessTimestamps.size > Math.max(maxSize * 2, 1000)) {
       const entries = Array.from(accessTimestamps.entries()).sort((a, b) => b[1] - a[1]);
@@ -337,6 +361,7 @@ function createBiscuit({
     }
   }
   async function enforceMaxSizeIfNeeded() {
+    log("Max size enforce if needed.");
     if (!maxSize) return;
     if (jar.size <= maxSize) return;
     const items = Array.from(accessTimestamps.entries()).sort((a, b) => a[1] - b[1]); // oldest first
@@ -349,6 +374,7 @@ function createBiscuit({
 
   // --- quota helpers (best-effort)
   async function checkQuotaAndMaybePurge() {
+    log("Quota check and maybe purge.");
     if (!navigator.storage || !navigator.storage.estimate) return;
     try {
       const estimate = await navigator.storage.estimate();
@@ -361,6 +387,7 @@ function createBiscuit({
     } catch (e) { log("Quota check failed", e); }
   }
   async function purgeOldestUntilBelow(targetBytes) {
+    log("Purge oldest until it is below max size.");
     if (!maxSize) {
       const items = Array.from(accessTimestamps.entries()).sort((a, b) => a[1] - b[1]);
       for (const [key] of items) {
@@ -378,6 +405,7 @@ function createBiscuit({
   // --- public API: set/get/mutate/remove/clear/subscribe
   async function set(key, value, ttl = 5 * 60 * 1000, fetcher = null) {
     ensureNotDestroyed();
+    log("Set item. item:", { key, value, ttl, fetcher });
     if (typeof key !== "string" || !key) throw new Error("set() expects a non-empty string key");
     await dbReady;
     const expiry = Date.now() + ttl;
@@ -412,6 +440,7 @@ function createBiscuit({
 
   async function get(key, { extend = true, staleWhileRevalidate = false } = {}) {
     ensureNotDestroyed();
+    log("Get item:", key);
     if (typeof key !== "string" || !key) throw new Error("get() expects a non-empty string key");
     await dbReady;
     const entry = jar.get(key);
@@ -421,6 +450,7 @@ function createBiscuit({
     touchKey(key);
 
     if (expired) {
+      log("Get item but expired")
       // on-demand immediate removal (unless staleWhileRevalidate + fetcher available)
       if (staleWhileRevalidate && refreshers.get(key)) {
         refresh(key).catch((e) => log("refresh error", e));
@@ -435,6 +465,7 @@ function createBiscuit({
     }
 
     if (extend) {
+      log("Get item and extend")
       entry.expiry = Date.now() + (entry.ttl || 5 * 60 * 1000);
       await persist(key, entry.value, entry.expiry, entry.ttl, jar.get(key)?.fetcherId || null);
       scheduleRefresh(key, entry.expiry);
@@ -445,6 +476,7 @@ function createBiscuit({
 
   async function mutate(key, mutator) {
     ensureNotDestroyed();
+    log("Mutate item:", { key, mutator });
     if (typeof mutator !== "function") throw new Error("mutate() expects a function as second argument");
     if (typeof key !== "string" || !key) throw new Error("mutate() expects a non-empty string key");
 
@@ -474,6 +506,7 @@ function createBiscuit({
 
   async function remove(key) {
     ensureNotDestroyed();
+    log("Remove item:", key);
     if (typeof key !== "string" || !key) throw new Error("remove() expects a non-empty string key");
     if (!jar.has(key)) return;
     jar.delete(key);
@@ -492,6 +525,7 @@ function createBiscuit({
 
   async function clear() {
     ensureNotDestroyed();
+    log("Clear item:");
     jar.clear(); refreshers.clear(); accessTimestamps.clear();
 
     // bump generation for all keys so pending refreshes abort
@@ -508,6 +542,7 @@ function createBiscuit({
   function subscribe(fn) { ensureNotDestroyed(); subscribers.add(fn); try { fn(getAll()); } catch (e) { } return () => subscribers.delete(fn); }
   function subscribeKey(key, fn) {
     ensureNotDestroyed();
+    log("Subscribe key:", { key, fn });
     if (typeof key !== "string" || !key) throw new Error("subscribeKey() expects a non-empty string key");
     if (typeof fn !== "function") throw new Error("subscribeKey() expects a function as second argument");
     if (!keySubscribers.has(key)) keySubscribers.set(key, new Set());
@@ -519,6 +554,7 @@ function createBiscuit({
     try { fn(jar.get(key)?.value ?? null); } catch (e) { }
 
     return () => {
+      log("Returned unsubcribe function");
       setForKey.delete(fn);
       if (setForKey.size === 0) keySubscribers.delete(key);
     };
@@ -529,6 +565,7 @@ function createBiscuit({
   function isOnline() { ensureNotDestroyed(); return online; }
 
   function scheduleRefresh(key, expiry) {
+    log("Scheduling refresh", { key, expiry });
     const entry = jar.get(key);
     if (!entry || !isOnline()) return;
 
@@ -542,6 +579,7 @@ function createBiscuit({
     const refreshTime = expiry - Date.now() - Math.floor(ttl * 0.1);
 
     if (refreshTime <= 0) {
+      log("refreshTime less / equal to 0, so quick refrsh.");
       refresh(key, gen).catch((e) => log("immediate refresh error", e));
       return;
     }
@@ -577,6 +615,7 @@ function createBiscuit({
       return true;
     } catch (e) {
       console.warn(`[BISCUIT] Refresh failed for ${key}:`, e);
+      log("Retrying once");
       // retry once
       if (expectedGen === refreshGenerations.get(key)) {
         try {
@@ -614,6 +653,7 @@ function createBiscuit({
 
   // --- offline/online handling
   function handleWentOnline() {
+    log("Online handled");
     online = true;
     for (const [key, entry] of jar.entries()) scheduleRefresh(key, entry.expiry);
     // refresh near-expiry items
@@ -626,6 +666,7 @@ function createBiscuit({
     notify();
   }
   function handleWentOffline() {
+    log("Offline handled");
     online = false;
     for (const [k, t] of refreshTimers.entries()) clearTimeout(t);
     refreshTimers.clear();
@@ -636,6 +677,7 @@ function createBiscuit({
   // --- Garbage collection: automatic, not user-called
   // Removes entries that have been expired for >= expiredRetention
   async function garbageCollectOnce() {
+    log("Garbage collector collecting once!");
     const now = Date.now();
     const toRemove = [];
     for (const [key, entry] of jar.entries()) {
@@ -653,6 +695,7 @@ function createBiscuit({
 
   function startGcTimer() {
     if (gcTimer) return; // already running
+    log("Start GC Timer!");
     gcTimer = setInterval(() => {
       garbageCollectOnce().catch((e) => log("GC error", e));
       checkQuotaAndMaybePurge().catch((e) => log("quota check error", e));
@@ -660,6 +703,7 @@ function createBiscuit({
   }
   function stopGcTimer() {
     if (gcTimer) {
+      log("Stop GC Timer!");
       clearInterval(gcTimer);
       gcTimer = null;
     }
@@ -668,6 +712,7 @@ function createBiscuit({
   // --- fetcher registration helpers (for persisted fetcherIds)
   function registerFetcher(id, fn) {
     ensureNotDestroyed();
+    log("Registering fetcher", { id, fn });
     if (!id || typeof fn !== "function") throw new Error("registerFetcher expects (id, function)");
     fetcherRegistry.set(id, fn);
     for (const [k, v] of jar.entries()) {
@@ -679,6 +724,7 @@ function createBiscuit({
   }
   function getMissingFetcherIds() {
     ensureNotDestroyed();
+    log("Getting missing fetchers Id");
     const missing = new Set();
     for (const [k, v] of jar.entries()) if (v.fetcherId && !fetcherRegistry.has(v.fetcherId)) missing.add(v.fetcherId);
     return Array.from(missing);
@@ -687,6 +733,7 @@ function createBiscuit({
   // --- inspect utility for dev/debugging
   function inspect() {
     ensureNotDestroyed();
+    log("Inspection!");
     const now = Date.now();
 
     const entries = {};
@@ -719,6 +766,7 @@ function createBiscuit({
   function destroy() {
     if (destroyed) return; // prevent double-destroy
 
+    log("Destroying...");
     stopGcTimer();
     refreshTimers.forEach((t) => clearTimeout(t));
     refreshTimers.clear();
@@ -731,6 +779,7 @@ function createBiscuit({
     }
 
     destroyed = true;
+    log("Destroyed! Restart by making another Biscuit instance.");
   }
 
   // --- guard helper

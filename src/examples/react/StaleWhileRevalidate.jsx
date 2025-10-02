@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import Biscuit from "./biscuit";
+import Biscuit from "biscuit-cache-js";
 
 export default function App() {
     const [user, setUser] = useState(null);
@@ -23,9 +23,9 @@ export default function App() {
         return () => unsubscribe();
     }, []);
 
-    const getUser = () => {
+    const getUser = async () => {
         // Even if expired, returns stale value first, then refreshes in background
-        const cached = Biscuit.get("user", { staleWhileRevalidate: true });
+        const cached = await Biscuit.get("user", { staleWhileRevalidate: true });
         console.log("Cached user:", cached);
     };
 

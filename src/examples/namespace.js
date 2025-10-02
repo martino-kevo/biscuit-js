@@ -8,8 +8,8 @@ async function demo() {
     await CartStore.set("items", ["Apple", "Banana"]);
     await UserStore.set("user", { id: "123", name: "Martins" });
 
-    console.log("Cart items:", CartStore.get("items")); // ["Apple", "Banana"]
-    console.log("User info:", UserStore.get("user"));   // { id: "123", name: "Martins" }
+    console.log("Cart items:", await CartStore.get("items")); // ["Apple", "Banana"]
+    console.log("User info:", await UserStore.get("user"));   // { id: "123", name: "Martins" }
 
     CartStore.subscribe(state => console.log("Cart changed:", state));
     UserStore.subscribe(state => console.log("User changed:", state));
