@@ -461,12 +461,37 @@ function createBiscuit({
     }
 
     if (extend) {
-      log("Get item and extend")
+      log("Get item and extend");
+      // 🔁 Ensure fetcher is rebound if missing
+      if (entry.fetcherId && !refreshers.has(key)) {
+        const fn = fetcherRegistry.get(entry.fetcherId);
+        if (fn) {
+          refreshers.set(key, fn);
+          log(`Rebound fetcher for ${key} during extend`);
+        } else {
+          log(`Missing fetcher function for id: ${entry.fetcherId} during extend`);
+        }
+      }
+      // 🕒 Extend expiry and persist
       entry.expiry = Date.now() + (entry.ttl || 5 * 60 * 1000);
       await persist(key, entry.value, entry.expiry, entry.ttl, entry.fetcherId);
+
       scheduleRefresh(key, entry.expiry);
     }
 
+    // 🩹 Fix: rebind fetcher if lost after reload or GC
+    if (entry.fetcherId && !refreshers.has(key)) {
+      const fn = fetcherRegistry.get(entry.fetcherId);
+      if (fn) {
+        refreshers.set(key, fn);
+        log(`Rebound fetcher for ${key} using id: ${entry.fetcherId}`);
+        if (Date.now() < entry.expiry) {
+          scheduleRefresh(key, entry.expiry);
+        }
+      } else {
+        log(`Missing fetcher function for id: ${entry.fetcherId}`);
+      }
+    }
     return entry.value;
   }
 
