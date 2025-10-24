@@ -24,6 +24,9 @@ interface BiscuitConfig {
     /** Max items in memory (LRU eviction if exceeded) */
     maxSize?: number;
 
+    /** Time to retain expired items (default: 24 hours) */
+    expiredRetention?: number; // eg. 86400000 = 24 hours
+
     /** Warn/purge when IndexedDB quota is close to limit */
     quotaWarningThreshold?: number; // e.g. 0.9 = 90%
 
