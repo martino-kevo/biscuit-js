@@ -694,6 +694,7 @@ function createBiscuit({
     log("Remove item:", key);
     if (typeof key !== "string" || !key)
       throw new Error("remove() expects a non-empty string key");
+    await dbReady;
     if (!jar.has(key)) return;
     jar.delete(key);
     refreshers.delete(key);
@@ -715,6 +716,7 @@ function createBiscuit({
   async function clear() {
     ensureNotDestroyed();
     log("Clear item:");
+    await dbReady;
     jar.clear();
     refreshers.clear();
     accessTimestamps.clear();
