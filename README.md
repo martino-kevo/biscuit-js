@@ -19,9 +19,10 @@
 ```sh
 npm install biscuit-cache-js
 
+```
 
 **🚀 Quick Start**
-
+```sh
 import Biscuit from "@martino-kevo/biscuit-js";
 
 async function main() {
@@ -48,8 +49,10 @@ async function main() {
 
 main();
 
-**⏱ TTL + Background Refresh**
+```
 
+**⏱ TTL + Background Refresh**
+```sh
 async function fetchFriends() {
   const res = await fetch("/api/friends");
   return res.json();
@@ -57,6 +60,8 @@ async function fetchFriends() {
 
 // Cache with 1 hour TTL + auto-refresh using the fetcher
 await Biscuit.set("friends", await fetchFriends(), 3600_000, fetchFriends);
+
+```
 
 
 Biscuit will:
@@ -69,9 +74,11 @@ Keep all tabs synced automatically
 
 Open two tabs of your app.
 Updating Biscuit in one tab updates the other automatically.
-
+```sh
 await Biscuit.set("theme", "dark");
 // Other tabs get notified instantly 🎉
+
+```
 
 **🛠 API Reference**
 

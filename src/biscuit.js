@@ -575,7 +575,7 @@ function createBiscuit({
     jar.set(key, entry);
     touchKey(key);
 
-    if (jar.size === 1) startGcTimer(); // start GC when first entry arrives
+    if (jar.size >= 1) startGcTimer(); // start GC when entry arrives
 
     let fetcherIdToPersist = null;
     if (fetcher) {
