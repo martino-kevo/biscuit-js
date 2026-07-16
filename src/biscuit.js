@@ -23,12 +23,30 @@ function createBiscuit({
   secret = null,
   debug = false,
   onMissingFetchers = null, // optional callback: async (missingIds:Array<string>) => void
+  maxRetries = 1, // how many times to retry a failed background refresh
+  retryDelay = (attempt) => Math.min(500 * 2 ** attempt, 10000), // backoff fn: attempt(1-based) -> ms
+  fetchTimeout = null, // ms; null = no timeout. Caps how long a single fetcher() call may run.
+  onError = null, // optional (error, context: string) => void — hook for telemetry/crash reporting
 } = {}) {
   const prefix = namespace ? `-${namespace}` : "";
   const DB_NAME = `biscuit-store${prefix}`;
   const STORE_NAME = `biscuit-jar${prefix}`;
   const CHANNEL_NAME = `biscuit${prefix}`;
   const STORAGE_KEY = `biscuit-sync${prefix}`;
+
+  // --- SSR / non-browser support, and graceful degradation: fall back to
+  // memory-only operation instead of throwing when indexedDB/window aren't
+  // present (Node, RN, SSR) OR when IndexedDB exists but fails to open
+  // (private-browsing restrictions, storage disabled by policy, a
+  // corrupted DB, etc.) — see init() below for the latter case.
+  const idbAvailable = typeof indexedDB !== "undefined";
+  let idbUsable = idbAvailable; // flips to false at runtime if openIDB() fails
+  const windowAvailable = typeof window !== "undefined";
+  if (!idbAvailable) {
+    console.warn(
+      "[BISCUIT] indexedDB is unavailable in this environment — running in memory-only mode (nothing will persist across reloads)."
+    );
+  }
 
   let db;
   let debugEnabled = !!debug;
@@ -47,9 +65,62 @@ function createBiscuit({
   const fetcherRegistry = new Map();
 
   const refreshGenerations = new Map();
+  const pendingRefreshes = new Map(); // key -> in-flight refresh Promise<boolean>
+  const activeAbortControllers = new Map(); // key -> AbortController for the current fetcher() call
+  const abortSupported = typeof AbortController !== "undefined";
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // Caps how long a single fetcher() call is awaited. If an onTimeout
+  // callback is given (used to abort()), it's invoked when the deadline
+  // hits, so a well-behaved fetcher can actually stop the underlying work
+  // instead of just being ignored. Fetchers that don't respect the signal
+  // still get a "soft" timeout: Biscuit stops waiting, but the call itself
+  // keeps running until it settles on its own.
+  function withTimeout(promise, ms, label, onTimeout) {
+    if (!ms) return promise;
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => {
+        if (onTimeout) {
+          try {
+            onTimeout();
+          } catch (_) {
+            /* ignore */
+          }
+        }
+        reject(new Error(`${label} timed out after ${ms}ms`));
+      }, ms);
+      promise.then(
+        (v) => {
+          clearTimeout(t);
+          resolve(v);
+        },
+        (e) => {
+          clearTimeout(t);
+          reject(e);
+        }
+      );
+    });
+  }
 
   function log(...args) {
     if (debugEnabled) console.log("[BISCUIT]", ...args);
+  }
+
+  // Errors that shouldn't crash the caller (background refresh failures,
+  // persistence failures, broadcast failures) still need to be observable
+  // in production, where console output usually isn't monitored.
+  function reportError(context, error) {
+    console.error(`[BISCUIT] ${context}:`, error);
+    if (typeof onError === "function") {
+      try {
+        onError(error, context);
+      } catch (handlerErr) {
+        console.error("[BISCUIT] onError handler itself threw:", handlerErr);
+      }
+    }
   }
 
   // --- encryption setup (per-DB salt, fallback if no WebCrypto)
@@ -100,6 +171,7 @@ function createBiscuit({
 
   // --- IndexedDB helpers (namespace-separated DB and store)
   function openIDB() {
+    if (!idbUsable) return Promise.resolve(null);
     log("Opening indexedDB...");
     return new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, 1);
@@ -115,6 +187,7 @@ function createBiscuit({
   }
 
   function idbGet(key) {
+    if (!idbUsable) return Promise.resolve(undefined);
     log("Get an item from indexedDB. Item key:", key);
     return new Promise((resolve, reject) => {
       try {
@@ -128,6 +201,7 @@ function createBiscuit({
     });
   }
   function idbGetAll() {
+    if (!idbUsable) return Promise.resolve([]);
     log("Get all items in indexedDB");
     return new Promise((resolve, reject) => {
       try {
@@ -141,6 +215,7 @@ function createBiscuit({
     });
   }
   function idbPut(obj) {
+    if (!idbUsable) return Promise.resolve();
     log("Put / Save an item in indexedDB. Item object:", obj);
     return new Promise((resolve, reject) => {
       try {
@@ -154,6 +229,7 @@ function createBiscuit({
     });
   }
   function idbDelete(key) {
+    if (!idbUsable) return Promise.resolve();
     log("Delete an item in indexedDB. Item key:", key);
     return new Promise((resolve, reject) => {
       try {
@@ -167,6 +243,7 @@ function createBiscuit({
     });
   }
   function idbClear() {
+    if (!idbUsable) return Promise.resolve();
     log("Clear up indexedDB");
     return new Promise((resolve, reject) => {
       try {
@@ -239,8 +316,17 @@ function createBiscuit({
   function broadcastChange(key, entry) {
     // entry: null for deletion, otherwise { value, expiry, ttl, fetcherId }
     log("Broadcast change:", { key, entry });
-    if (channelSupported) channel.postMessage({ key, entry });
-    else {
+    if (channelSupported) {
+      try {
+        channel.postMessage({ key, entry });
+      } catch (e) {
+        // Most commonly DataCloneError — the cached value contains something
+        // structured-clone can't handle (a function, DOM node, etc). The
+        // local write already succeeded; don't let this throw out of
+        // set()/remove()/clear() and make a successful write look failed.
+        reportError(`Cross-tab broadcast failed for key "${key}"`, e);
+      }
+    } else {
       try {
         localStorage.setItem(
           STORAGE_KEY,
@@ -254,6 +340,19 @@ function createBiscuit({
 
   function handleRemoteUpdate(key, entry) {
     log("Remote update received:", { key, entry });
+
+    // full-store clear from another tab (see clear())
+    if (key === null) {
+      log("Remote update is a full clear — wiping in-memory jar");
+      jar.clear();
+      refreshers.clear();
+      accessTimestamps.clear();
+      refreshTimers.forEach((t) => clearTimeout(t));
+      refreshTimers.clear();
+      notify();
+      return;
+    }
+
     const cur = jar.get(key);
     if (!entry) {
       // deletion
@@ -266,21 +365,30 @@ function createBiscuit({
       return;
     }
     // entry has value, expiry, ttl, fetcherId
-    const newSerialized = JSON.stringify(entry.value);
-    const curSerialized = cur ? JSON.stringify(cur.value) : null;
+    // Values that can't be JSON.stringify'd (circular refs, BigInt, etc.)
+    // just skip the equality optimization below and always apply the
+    // update — correctness over a perf shortcut.
+    let valuesDiffer = true;
+    try {
+      valuesDiffer = JSON.stringify(entry.value) !== (cur ? JSON.stringify(cur.value) : null);
+    } catch (e) {
+      log("Could not compare remote value (non-serializable) — applying update anyway", e);
+    }
     const expiry = entry.expiry || Date.now() + 5 * 60 * 1000;
     const ttl = entry.ttl || null;
     const fetcherId = entry.fetcherId || null;
+    const refreshPolicy = entry.refreshPolicy || "background";
 
     if (
       !cur ||
-      newSerialized !== curSerialized ||
+      valuesDiffer ||
       cur.expiry !== expiry ||
       cur.ttl !== ttl ||
-      cur.fetcherId !== fetcherId
+      cur.fetcherId !== fetcherId ||
+      cur.refreshPolicy !== refreshPolicy
     ) {
       log("Remote update. Exact similar value does not exist, so updating.");
-      jar.set(key, { key, value: entry.value, expiry, ttl, fetcherId });
+      jar.set(key, { key, value: entry.value, expiry, ttl, fetcherId, refreshPolicy });
       touchKey(key);
       // attach fetcher if available
       if (fetcherId && fetcherRegistry.has(fetcherId)) {
@@ -294,19 +402,28 @@ function createBiscuit({
   }
 
   if (channelSupported)
-    channel.onmessage = (e) => handleRemoteUpdate(e.data.key, e.data.value);
-  else
+    channel.onmessage = (e) => handleRemoteUpdate(e.data.key, e.data.entry);
+  else if (windowAvailable)
     window.addEventListener("storage", (e) => {
       if (e.key === STORAGE_KEY && e.newValue) {
-        const { key, value } = JSON.parse(e.newValue);
-        handleRemoteUpdate(key, value);
+        const { key, entry } = JSON.parse(e.newValue);
+        handleRemoteUpdate(key, entry);
       }
     });
 
   // --- init: open db, load entries, prepare crypto + invoke missing fetcher callback
   async function init() {
     log("Initializing / Starting up");
-    db = await openIDB();
+    try {
+      db = await openIDB();
+    } catch (e) {
+      reportError(
+        "IndexedDB failed to open — falling back to memory-only mode for this session",
+        e
+      );
+      idbUsable = false;
+      db = null;
+    }
     if (useEncryption) {
       try {
         await ensureCryptoKey();
@@ -336,6 +453,7 @@ function createBiscuit({
             expiry: e.expiry,
             ttl: e.ttl,
             fetcherId: e.fetcherId,
+            refreshPolicy: e.refreshPolicy || "background",
           });
           accessTimestamps.set(e.key, Date.now());
           // if fetcherId exists and registry has fn, attach
@@ -351,6 +469,7 @@ function createBiscuit({
             expiry: e.expiry,
             ttl: e.ttl,
             fetcherId: e.fetcherId,
+            refreshPolicy: e.refreshPolicy || "background",
           });
           accessTimestamps.set(e.key, Date.now());
         }
@@ -383,6 +502,7 @@ function createBiscuit({
         }
       } catch (e) {
         console.warn("[BISCUIT] onMissingFetchers callback threw", e);
+        reportError("onMissingFetchers callback threw", e);
       }
     }
 
@@ -400,8 +520,8 @@ function createBiscuit({
   }
 
   // --- persistence helper (encrypt if enabled) — stores fetcherId (string) if provided
-  async function persist(key, value, expiry, ttl, fetcherId = null) {
-    log("Persist key - value. Item:", { key, value, expiry, ttl, fetcherId });
+  async function persist(key, value, expiry, ttl, fetcherId = null, refreshPolicy = "background") {
+    log("Persist key - value. Item:", { key, value, expiry, ttl, fetcherId, refreshPolicy });
     return withDB(async () => {
       try {
         let toStore = value;
@@ -417,16 +537,32 @@ function createBiscuit({
             toStore = value;
           }
         }
-        await idbPut({
+        const record = {
           key,
           value: toStore,
           expiry,
           ttl,
           encrypted: encryptedFlag,
           fetcherId: fetcherId || null,
-        });
+          refreshPolicy,
+        };
+        try {
+          await idbPut(record);
+        } catch (err) {
+          if (err && err.name === "QuotaExceededError") {
+            log("Quota exceeded on write — evicting oldest entries and retrying once");
+            try {
+              await purgeOldestUntilBelow(0); // best-effort: free up space, then retry
+              await idbPut(record);
+            } catch (retryErr) {
+              reportError(`Persist failed for key "${key}" (quota exceeded, retry also failed)`, retryErr);
+            }
+          } else {
+            reportError(`Persist failed for key "${key}"`, err);
+          }
+        }
       } catch (err) {
-        console.error("[BISCUIT] Persist failed:", err);
+        reportError(`Persist failed for key "${key}"`, err);
       }
     });
   }
@@ -435,7 +571,7 @@ function createBiscuit({
       try {
         await idbDelete(key);
       } catch (err) {
-        console.error("[BISCUIT] Remove failed:", err);
+        reportError(`IndexedDB remove failed for key "${key}"`, err);
       }
     });
   }
@@ -444,7 +580,7 @@ function createBiscuit({
       try {
         await idbClear();
       } catch (err) {
-        console.error("[BISCUIT] Clear failed:", err);
+        reportError("IndexedDB clear failed", err);
       }
     });
   }
@@ -517,7 +653,7 @@ function createBiscuit({
   // --- quota helpers (best-effort)
   async function checkQuotaAndMaybePurge() {
     log("Quota check and maybe purge.");
-    if (!navigator.storage || !navigator.storage.estimate) return;
+    if (typeof navigator === "undefined" || !navigator.storage || !navigator.storage.estimate) return;
     try {
       const estimate = await navigator.storage.estimate();
       const usage = estimate.usage || 0;
@@ -564,14 +700,22 @@ function createBiscuit({
   }
 
   // --- public API: set/get/mutate/remove/clear/subscribe
-  async function set(key, value, ttl = 5 * 60 * 1000, fetcher = null) {
+  async function set(key, value, ttl = 5 * 60 * 1000, fetcher = null, options = {}) {
     ensureNotDestroyed();
-    log("Set item. item:", { key, value, ttl, fetcher });
+    log("Set item. item:", { key, value, ttl, fetcher, options });
     if (typeof key !== "string" || !key)
       throw new Error("set() expects a non-empty string key");
+    if (key === "__meta__")
+      throw new Error('"__meta__" is a reserved Biscuit key and cannot be set');
     await dbReady;
+    const existingEntry = jar.get(key);
+    const refreshPolicy = options.refreshPolicy || existingEntry?.refreshPolicy || "background";
+    if (!["background", "on-demand", "never"].includes(refreshPolicy))
+      throw new Error(
+        `set() refreshPolicy must be "background", "on-demand", or "never" (got "${refreshPolicy}")`
+      );
     const expiry = Date.now() + ttl;
-    const entry = { key, value, expiry, ttl };
+    const entry = { key, value, expiry, ttl, refreshPolicy };
     jar.set(key, entry);
     touchKey(key);
 
@@ -596,8 +740,9 @@ function createBiscuit({
       refreshers.delete(key);
     }
 
-    await persist(key, value, expiry, ttl, fetcherIdToPersist);
-    broadcastChange(key, { value, expiry, ttl, fetcherId: fetcherIdToPersist });
+    entry.fetcherId = fetcherIdToPersist;
+    await persist(key, value, expiry, ttl, fetcherIdToPersist, refreshPolicy);
+    broadcastChange(key, { value, expiry, ttl, fetcherId: fetcherIdToPersist, refreshPolicy });
     scheduleRefresh(key, expiry);
     await enforceMaxSizeIfNeeded();
     notify();
@@ -606,7 +751,7 @@ function createBiscuit({
 
   async function get(
     key,
-    { extend = true, staleWhileRevalidate = false } = {}
+    { extend = true, staleWhileRevalidate = false, blocking = false } = {}
   ) {
     ensureNotDestroyed();
     log("Get item:", key);
@@ -621,11 +766,32 @@ function createBiscuit({
 
     if (expired) {
       log("Get item but expired");
-      // on-demand immediate removal (unless staleWhileRevalidate + fetcher available)
-      if (staleWhileRevalidate && refreshers.get(key)) {
+      const fetcher = refreshers.get(key);
+      const autoRefreshAllowed = !!fetcher && entry.refreshPolicy !== "never";
+
+      // Explicit blocking request — caller needs a freshness guarantee
+      // before proceeding (e.g. re-checking a permission right before a
+      // sensitive action). Rare; most callers should not set this.
+      if (blocking && autoRefreshAllowed) {
+        const ok = await refresh(key).catch((e) => {
+          log("blocking refresh error", e);
+          return false;
+        });
+        if (ok) return jar.get(key)?.value ?? null;
+        // refresh failed — fall through to normal expiry handling below
+      }
+
+      // Non-blocking stale-while-revalidate. This is ALWAYS the behavior
+      // for "on-demand" keys (that's the point of on-demand: fetch lazily
+      // on access, but never make the caller wait on the network) — and
+      // it's opt-in for "background" keys via staleWhileRevalidate, for
+      // the rare case where a key expires before its scheduled refresh
+      // catches up (e.g. after being offline).
+      if (autoRefreshAllowed && (entry.refreshPolicy === "on-demand" || staleWhileRevalidate)) {
         refresh(key).catch((e) => log("refresh error", e));
         return entry.value;
       }
+
       jar.delete(key);
       accessTimestamps.delete(key);
       await removeFromDB(key);
@@ -641,7 +807,7 @@ function createBiscuit({
 
       // 🕒 Extend expiry and persist
       entry.expiry = Date.now() + (entry.ttl || 5 * 60 * 1000);
-      await persist(key, entry.value, entry.expiry, entry.ttl, entry.fetcherId);
+      await persist(key, entry.value, entry.expiry, entry.ttl, entry.fetcherId, entry.refreshPolicy);
 
       scheduleRefresh(key, entry.expiry);
     }
@@ -768,7 +934,10 @@ function createBiscuit({
   }
 
   // --- refresh scheduling & execution (pauses when offline)
-  let online = typeof navigator !== "undefined" ? navigator.onLine : true;
+  let online =
+    typeof navigator !== "undefined" && typeof navigator.onLine === "boolean"
+      ? navigator.onLine
+      : true;
   function isOnline() {
     ensureNotDestroyed();
     return online;
@@ -778,6 +947,10 @@ function createBiscuit({
     log("Scheduling refresh", { key, expiry });
     const entry = jar.get(key);
     if (!entry || !isOnline()) return;
+    if (entry.refreshPolicy === "never" || entry.refreshPolicy === "on-demand") {
+      log(`Skipping auto-schedule for ${key} — refreshPolicy is "${entry.refreshPolicy}"`);
+      return;
+    }
 
     // bump generation for this key
     const gen = (refreshGenerations.get(key) || 0) + 1;
@@ -793,72 +966,212 @@ function createBiscuit({
       refresh(key, gen).catch((e) => log("immediate refresh error", e));
       return;
     }
-    const timer = setTimeout(() => refresh(key, gen), refreshTime);
+    const timer = setTimeout(() => {
+      refresh(key, gen).catch((e) => log("scheduled refresh error", e));
+    }, refreshTime);
     refreshTimers.set(key, timer);
   }
 
   async function refresh(key, expectedGen = refreshGenerations.get(key)) {
     ensureNotDestroyed();
+    // de-duplicate concurrent refresh calls for the same key — share one in-flight fetch
+    if (pendingRefreshes.has(key)) {
+      log("Refresh already in-flight for", key, "— reusing promise");
+      return pendingRefreshes.get(key);
+    }
+    const promise = doRefresh(key, expectedGen).finally(() => {
+      pendingRefreshes.delete(key);
+    });
+    pendingRefreshes.set(key, promise);
+    return promise;
+  }
+
+  async function doRefresh(key, expectedGen) {
     log("Refreshing key:", key);
     const entry = jar.get(key);
     const fetcher = refreshers.get(key);
-    if (!entry || !fetcher || !isOnline()) return;
+    if (!entry || !fetcher || !isOnline()) return false;
 
     const currentGen = refreshGenerations.get(key);
-    if (expectedGen !== currentGen) return; // superseded
+    if (expectedGen !== currentGen) return false; // superseded
 
-    try {
-      const freshValue = await fetcher();
+    let lastErr = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (attempt > 0) {
+        const delay = retryDelay(attempt);
+        log(`Retry #${attempt} for ${key} after ${delay}ms`);
+        await sleep(delay);
+        if (
+          destroyed ||
+          !isOnline() ||
+          !jar.has(key) ||
+          expectedGen !== refreshGenerations.get(key)
+        )
+          return false; // conditions changed while waiting to retry
+      }
+      const controller = abortSupported ? new AbortController() : null;
+      if (controller) activeAbortControllers.set(key, controller);
+      try {
+        const freshValue = await withTimeout(
+          Promise.resolve(fetcher(controller ? controller.signal : undefined)),
+          fetchTimeout,
+          `Fetcher for key "${key}"`,
+          controller
+            ? () => controller.abort(new Error(`fetchTimeout of ${fetchTimeout}ms exceeded`))
+            : undefined
+        );
 
-      // Check conditions again after fetch resolves
-      if (destroyed) return;
-      if (!isOnline()) return;
-      if (!jar.has(key)) return;
-      if (expectedGen !== refreshGenerations.get(key)) return; // another refresh happened since
+        if (destroyed) return false;
+        if (!isOnline()) return false;
+        if (!jar.has(key)) return false;
+        if (expectedGen !== refreshGenerations.get(key)) return false; // superseded mid-fetch
 
-      // const fetcherId = jar.get(key)?.fetcherId || null;
-      const fetcherId = entry.fetcherId;
-      await set(
-        key,
-        freshValue,
-        entry.ttl,
-        // jar.get(key)?.ttl,
-        fetcherId ? { fn: fetcher, id: fetcherId } : fetcher
-      );
-      return true;
-    } catch (e) {
-      console.warn(`[BISCUIT] Refresh failed for ${key}:`, e);
-      log("Retrying once");
-      // retry once
-      if (expectedGen === refreshGenerations.get(key)) {
-        try {
-          const retryValue = await fetcher();
-          if (
-            !destroyed &&
-            isOnline() &&
-            jar.has(key) &&
-            expectedGen === refreshGenerations.get(key)
-          ) {
-            const fetcherId = entry.fetcherId;
-            await set(
-              key,
-              retryValue,
-              entry.ttl,
-              // jar.get(key)?.ttl,
-              fetcherId ? { fn: fetcher, id: fetcherId } : fetcher
-            );
-          }
-        } catch (err) {
-          console.warn(`[BISCUIT] Refresh retry failed for ${key}:`, err);
+        const fetcherId = entry.fetcherId;
+        await set(
+          key,
+          freshValue,
+          entry.ttl,
+          fetcherId ? { fn: fetcher, id: fetcherId } : fetcher
+        );
+        return true;
+      } catch (e) {
+        lastErr = e;
+        console.warn(
+          `[BISCUIT] Refresh attempt ${attempt + 1}/${maxRetries + 1} failed for ${key}:`,
+          e
+        );
+      } finally {
+        if (controller && activeAbortControllers.get(key) === controller) {
+          activeAbortControllers.delete(key);
         }
       }
     }
+    console.warn(`[BISCUIT] Refresh exhausted retries for ${key}`, lastErr);
+    reportError(`Background refresh exhausted retries for key "${key}"`, lastErr);
+    return false;
   }
 
   function has(key) {
     ensureNotDestroyed();
     const entry = jar.get(key);
     return !!entry && Date.now() < entry.expiry;
+  }
+
+  // --- invalidation: force expiry now, so the next get() (or an active
+  // background/on-demand fetcher) picks up a fresh value
+  async function invalidate(key) {
+    ensureNotDestroyed();
+    log("Invalidate key:", key);
+    if (typeof key !== "string" || !key)
+      throw new Error("invalidate() expects a non-empty string key");
+    const entry = jar.get(key);
+    if (!entry) return false;
+
+    entry.expiry = Date.now() - 1;
+    await persist(key, entry.value, entry.expiry, entry.ttl, entry.fetcherId, entry.refreshPolicy);
+    broadcastChange(key, {
+      value: entry.value,
+      expiry: entry.expiry,
+      ttl: entry.ttl,
+      fetcherId: entry.fetcherId,
+      refreshPolicy: entry.refreshPolicy,
+    });
+
+    // if a fetcher is attached, kick off a refresh right away rather than
+    // waiting for the next get() call to notice the expiry
+    if (refreshers.has(key)) {
+      refresh(key).catch((e) => log("invalidate refresh error", e));
+    }
+    notify();
+    return true;
+  }
+
+  // --- pattern invalidation: '*' wildcard string, or a RegExp
+  async function invalidatePattern(pattern) {
+    ensureNotDestroyed();
+    log("Invalidate pattern:", pattern);
+    let re;
+    if (pattern instanceof RegExp) re = pattern;
+    else if (typeof pattern === "string") {
+      const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+      re = new RegExp(`^${escaped.replace(/\*/g, ".*")}$`);
+    } else {
+      throw new Error("invalidatePattern() expects a string or RegExp");
+    }
+    const matched = Array.from(jar.keys()).filter((k) => re.test(k));
+    await Promise.all(matched.map((k) => invalidate(k)));
+    return matched;
+  }
+
+  // --- batch operations
+  async function setMany(items) {
+    ensureNotDestroyed();
+    if (!Array.isArray(items))
+      throw new Error("setMany() expects an array of { key, value, ttl?, fetcher?, options? }");
+    return Promise.all(
+      items.map((item) =>
+        set(item.key, item.value, item.ttl, item.fetcher, item.options)
+      )
+    );
+  }
+  async function getMany(keys, options) {
+    ensureNotDestroyed();
+    if (!Array.isArray(keys))
+      throw new Error("getMany() expects an array of string keys");
+    const results = await Promise.all(keys.map((k) => get(k, options)));
+    const out = {};
+    keys.forEach((k, i) => (out[k] = results[i]));
+    return out;
+  }
+
+  // --- waitFor: resolve the first time a key has a (non-null) value
+  const pendingWaitForRejects = new Set(); // cleared/rejected on destroy()
+
+  function waitFor(key, { timeout = null } = {}) {
+    ensureNotDestroyed();
+    if (typeof key !== "string" || !key)
+      throw new Error("waitFor() expects a non-empty string key");
+    const current = jar.get(key);
+    if (current && Date.now() < current.expiry && current.value != null) {
+      return Promise.resolve(current.value);
+    }
+    return new Promise((resolve, reject) => {
+      let timer = null;
+      const cleanup = () => pendingWaitForRejects.delete(rejectEntry);
+      const rejectEntry = (err) => {
+        cleanup();
+        reject(err);
+      };
+      pendingWaitForRejects.add(rejectEntry);
+      const unsub = subscribeKey(key, (value) => {
+        if (value != null) {
+          if (timer) clearTimeout(timer);
+          unsub();
+          cleanup();
+          resolve(value);
+        }
+      });
+      if (timeout) {
+        timer = setTimeout(() => {
+          unsub();
+          rejectEntry(new Error(`waitFor("${key}") timed out after ${timeout}ms`));
+        }, timeout);
+      }
+    });
+  }
+
+  // --- best-effort storage usage estimate, exposed publicly
+  async function estimateUsage() {
+    ensureNotDestroyed();
+    if (typeof navigator === "undefined" || !navigator.storage || !navigator.storage.estimate)
+      return null;
+    try {
+      const { usage = 0, quota = 0 } = await navigator.storage.estimate();
+      return { usage, quota, percent: quota ? usage / quota : 0 };
+    } catch (e) {
+      log("estimateUsage failed", e);
+      return null;
+    }
   }
   function size({ includeExpired = false } = {}) {
     ensureNotDestroyed();
@@ -1026,6 +1339,15 @@ function createBiscuit({
     refreshTimers.forEach((t) => clearTimeout(t));
     refreshTimers.clear();
 
+    activeAbortControllers.forEach((controller) => {
+      try {
+        controller.abort(new Error("Biscuit instance was destroyed"));
+      } catch (_) {
+        /* ignore */
+      }
+    });
+    activeAbortControllers.clear();
+
     if (channelSupported && channel) channel.close();
 
     if (typeof window !== "undefined") {
@@ -1055,6 +1377,12 @@ function createBiscuit({
     subscribe,
     subscribeKey,
     refresh,
+    invalidate,
+    invalidatePattern,
+    setMany,
+    getMany,
+    waitFor,
+    estimateUsage,
     has,
     keys,
     size,
@@ -1071,6 +1399,7 @@ function createBiscuit({
       refreshers,
       refreshTimers,
       fetcherRegistry,
+      pendingRefreshes,
     },
   };
 }
