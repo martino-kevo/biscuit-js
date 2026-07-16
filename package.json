@@ -9,6 +9,9 @@
         ".": {
             "import": "./src/biscuit.js",
             "types": "./src/biscuit.d.ts"
+        },
+        "./react": {
+            "import": "./src/biscuit-react.js"
         }
     },
     "keywords": [

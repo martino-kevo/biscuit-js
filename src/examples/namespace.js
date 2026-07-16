@@ -1,4 +1,4 @@
-import { createBiscuit } from "./biscuit-cache-js";
+import { createBiscuit } from "biscuit-cache-js";
 
 // Create isolated stores
 const CartStore = createBiscuit({ namespace: "cart" });

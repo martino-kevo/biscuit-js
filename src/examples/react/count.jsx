@@ -11,6 +11,14 @@ export default function App() {
             setCount(state.counter || 0);
         });
 
+        // mutate() can only update an EXISTING key — it won't create one.
+        // Seed "counter" first so the increment button below actually works.
+        (async () => {
+            if (!Biscuit.has("counter")) {
+                await Biscuit.set("counter", 0);
+            }
+        })();
+
         return () => unsubscribe();
     }, []);
 

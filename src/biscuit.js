@@ -1408,30 +1408,3 @@ function createBiscuit({
 const Biscuit = createBiscuit();
 export default Biscuit;
 export { createBiscuit };
-
-/**
- * -------------------------------------------------------
- * 🏗️ FUTURE IMPROVEMENTS FOR BISCUIT
- * -------------------------------------------------------
- *
- * 2. **Cache Invalidation**
- *    - Provide `invalidate(key)` to force refresh on next `get()`.
- *    - Optionally allow cascading invalidation for related keys
- *      (e.g., invalidate `friends-*` keys when a friend changes).
- *
- * 3. **Batch Operations**
- *
- *
- * 8. **TypeScript Enhancements**
- *    - Add types for `createBiscuit({ namespace })` so namespace-based
- *      instances get proper IntelliSense support.
- *
- * 9. **SSR / Hybrid Support**
- *    - Provide a no-op or memory-only version for Node.js / SSR.
- *
- * 10. **Custom TTL Policies**
- *     - Allow per-key refresh strategies:
- *       - `never` (manual refresh only)
- *       - `on-demand` (refresh when accessed after expiry)
- *       - `background` (current default)
- */

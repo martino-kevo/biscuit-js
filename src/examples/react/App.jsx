@@ -12,7 +12,10 @@ import Biscuit from "biscuit-cache-js";
 // })
 
 export default function App() {
-    const [profile, setProfile] = useState(Biscuit.get("profile"));
+    // subscribe() calls its callback immediately with the current cache
+    // snapshot, so this gets populated as soon as the effect below runs —
+    // no need (and no way, since get() is async) to resolve it here.
+    const [profile, setProfile] = useState(null);
 
     useEffect(() => {
         const unsubscribe = Biscuit.subscribe(state => {
