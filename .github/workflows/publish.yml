@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # 🔑 This gives the automatic GITHUB_TOKEN the power to handshake with npm
+      id-token: write # Mandatory for the clean OIDC cloud handshake
     steps:
       - name: Checkout Code
         uses: actions/checkout@v5
@@ -17,16 +17,13 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: "24"
-          registry-url: "https://npmjs.org" # Sets up the OIDC bridge structure safely
+          # ❌ NO registry-url config here to protect npm ci from global auth issues
 
       - name: Install dependencies
-        # Force npm to run anonymously so public dependencies don't get blocked
-        run: npm ci
-        env:
-          NODE_AUTH_TOKEN: ""
+        run: npm ci # This installs csstype cleanly and anonymously with zero auth
 
       - name: Publish Package
-        # Use the special OIDC token variable that GitHub automatically populates
-        run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+        # 🔑 Inject OIDC configuration manually dynamically for the publish step only
+        run: |
+          npm config set //registry.npmjs.org/:_authToken=$ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          npm publish --provenance
