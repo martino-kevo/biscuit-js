@@ -6,21 +6,19 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # Required for secure OIDC trusted publishing
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v5 # Upgraded to v5 (Node 24 compliant)
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5 # Upgraded to v5 (Node 24 compliant)
+        uses: actions/setup-node@v5
         with:
-          node-version: "24" # Sets the execution runtime environment to Node 24
-          registry-url: "https://npmjs.org"
+          node-version: "24"
+          # ❌ REMOVED registry-url line to stop it from forcing auth on public package installs
 
       - name: Install dependencies
-        run: npm ci # Performs a clean, deterministic package installation
+        run: npm ci
 
       - name: Publish Package
-        run: npm publish --provenance
+        # 🔑 Inject the token cleanly only for the publish step
+        run: npm publish --_auth=${{ secrets.NPM_TOKEN }} --registry=https://registry.npmjs.org/
