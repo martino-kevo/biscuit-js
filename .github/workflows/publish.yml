@@ -1,28 +1,26 @@
 name: Publish to npm
 
 on:
-  workflow_dispatch: # This adds a manual "Run" button on the GitHub website
+  workflow_dispatch: # Allows manual trigger from the GitHub website
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # Mandatory for secure OIDC 2FA bypass
+      id-token: write # Required for secure OIDC trusted publishing
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5 # Upgraded to v5 (Node 24 compliant)
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5 # Upgraded to v5 (Node 24 compliant)
         with:
-          node-version: "22"
+          node-version: "24" # Sets the execution runtime environment to Node 24
           registry-url: "https://npmjs.org"
 
-      - name: Install dependencies and build
-        run: |
-          npm install
-          # If you have a build step (like npm run build), add it right here!
+      - name: Install dependencies
+        run: npm ci # Performs a clean, deterministic package installation
 
       - name: Publish Package
         run: npm publish --provenance
