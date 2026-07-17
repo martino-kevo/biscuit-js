@@ -7,15 +7,15 @@
     <script type="module">
         import Biscuit from "../../src/biscuit.js";
 
+        // Subscribe first, so we see the value land as soon as it's set
+        Biscuit.subscribe(state => console.log("Biscuit state changed:", state));
+
         // Set a value
         await Biscuit.set("profile", { name: "Martins" }, 10000);
 
         // Get the value
-        const profile = Biscuit.get("profile");
+        const profile = await Biscuit.get("profile");
         console.log("Profile:", profile);
-
-        // Subscribe to changes
-        Biscuit.subscribe(state => console.log("Biscuit state changed:", state));
 
         // Mutate
         await Biscuit.mutate("profile", current => ({ ...current, age: 25 }));

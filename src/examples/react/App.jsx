@@ -1,36 +1,20 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import Biscuit from "biscuit-cache-js";
-
-// createBiscuit({
-//   onMissingFetchers: async (missingIds) => {
-//     for (const id of missingIds) {
-//       if (id === "trafficFetcher") {
-//         registerFetcher("trafficFetcher", async () => api.getTraffic("I-95:miami"));
-//       }
-//     }
-//   }
-// })
+import { useBiscuit } from "biscuit-cache-js/react";
 
 export default function App() {
-    // subscribe() calls its callback immediately with the current cache
-    // snapshot, so this gets populated as soon as the effect below runs —
-    // no need (and no way, since get() is async) to resolve it here.
-    const [profile, setProfile] = useState(null);
-
-    useEffect(() => {
-        const unsubscribe = Biscuit.subscribe(state => {
-            setProfile(state.profile);
-        });
-
-        Biscuit.set("profile", { name: "Martins" }, 10000);
-
-        return () => unsubscribe();
-    }, []);
+    // useBiscuit reads "profile", seeds it via the fetcher if it's missing,
+    // and stays in sync with future updates automatically — no manual
+    // subscribe()/useEffect wiring needed.
+    const [profile, { loading }] = useBiscuit(Biscuit, "profile", {
+        fetcher: async () => ({ name: "Martins" }),
+        ttl: 10000,
+    });
 
     return (
         <div>
             <h1>React Biscuit Example</h1>
-            <pre>{JSON.stringify(profile, null, 2)}</pre>
+            {loading ? <p>Loading…</p> : <pre>{JSON.stringify(profile, null, 2)}</pre>}
         </div>
     );
 }

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Biscuit Stale-While-Revalidate Example</title>
+    <script type="module">
+        import Biscuit from "../../src/biscuit.js";
+
+        async function fetchUser(signal) {
+            console.log("Fetching fresh user...");
+            const res = await fetch("/api/user", { signal });
+            return res.json();
+        }
+
+        // refreshPolicy: "on-demand" — nothing fetches until "user" is read
+        // after expiring, and even then get() never blocks: it returns the
+        // stale value immediately and refreshes in the background. This is
+        // Biscuit's built-in stale-while-revalidate.
+        await Biscuit.set("user", { name: "Loading..." }, 5000, fetchUser, {
+            refreshPolicy: "on-demand"
+        });
+
+        // Non-blocking (default): returns stale instantly, refreshes behind it.
+        console.log("Initial user (non-blocking):", await Biscuit.get("user"));
+
+        // Explicit opt-in for the rare case where staleness is a real bug —
+        // e.g. re-checking a permission right before a sensitive action.
+        window.getUserFresh = async () => {
+            console.log("Fresh user (blocking):", await Biscuit.get("user", { blocking: true }));
+        };
+
+        // Subscribe to see fresh updates after revalidation
+        Biscuit.subscribe(state => console.log("User updated:", state.user));
+    </script>
+</head>
+
+<body>
+    <h1>Check console for Biscuit output!</h1>
+    <p>Try <code>getUserFresh()</code> in the console after the initial 5s TTL expires.</p>
+</body>
+
+</html>

@@ -23,6 +23,21 @@
 npm install biscuit-cache-js
 ```
 
+Zero required dependencies. React is fully optional — the core package
+never imports it, so `biscuit-cache-js` runs the same core API in a Node
+backend, a vanilla-JS frontend, or a React app (Node/SSR automatically
+falls back to memory-only, since there's no IndexedDB to persist to).
+
+**Note on `peerDependencies`:** `package.json` lists `react` as an
+> *optional* peer dependency. That requirement only applies if you import
+> from `biscuit-cache-js/react` (i.e. you use `useBiscuit` or `useBiscuitAll`).
+> If you only import from `biscuit-cache-js` itself, react doesn't need to be
+> installed at all — `npm`/`yarn`/`pnpm` may still print an "optional peer
+> dependency not installed" notice in that case, which is expected and safe
+> to ignore.
+
+---
+
 ## 🚀 Quick Start
 ```js
 import Biscuit from "biscuit-cache-js";
@@ -235,6 +250,18 @@ It removes the pain of:
 ## 📂 Examples
 
 See the [`examples/`](./examples) folder for more use cases — basic usage, namespaces, debug logging, and a full feature walkthrough.
+
+---
+
+## 💡 The Story Behind Biscuit
+
+This idea for a caching system came to me from the Holy Spirit. I brought it to ChatGPT first to work out the shape of it, then to Claude to push it further — persistence, background refresh, cross-tab sync, and eventually a React layer, built out piece by piece across a lot of back-and-forth.
+
+None of it was obvious going in. Getting cross-tab sync actually correct, making background refresh behave when a tab's been backgrounded for a while, deciding what a cache should do when IndexedDB itself fails — those took real iteration, not a single lucky prompt.
+
+Biscuit is what came out of that: a cache that acts like `localStorage`, but doesn't lose your data on reload, doesn't go stale silently, and doesn't fall out of sync the moment you open a second tab.
+
+Also by me: [**executor-fn**](https://www.npmjs.com/package/executor-fn) — a function wrapper with state, history, and undo/redo built in.
 
 ---
 

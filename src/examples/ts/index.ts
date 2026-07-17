@@ -9,7 +9,7 @@ interface Profile {
 await Biscuit.set<Profile>("profile", { name: "Martins" }, 10000);
 
 // Get the value
-const profile = Biscuit.get<Profile>("profile");
+const profile = await Biscuit.get<Profile>("profile");
 console.log("Profile (TS):", profile);
 
 // Mutate
