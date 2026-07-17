@@ -1,14 +1,14 @@
 name: Publish to npm
 
 on:
-  workflow_dispatch: # Allows you to click "Run" on GitHub
+  workflow_dispatch:
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # Crucial: Allows GitHub to prove its identity to npm securely
+      id-token: write # Required for Trusted Publishing handshake
     steps:
       - name: Checkout Code
         uses: actions/checkout@v5
@@ -17,10 +17,11 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: "24"
-          registry-url: "https://npmjs.org"
+          # ❌ Removed registry-url here so 'npm ci' doesn't get corrupted by auth rules
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci # This will now safely download csstype anonymously
 
       - name: Publish Package
-        run: npm publish --provenance
+        # 🚀 Pass the registry and provenance flags directly to the publish execution step
+        run: npm publish --registry=https://npmjs.org --provenance
